@@ -8,8 +8,11 @@ Pergunta problema:
    financeira do município de Criciúma?"
 
 UNIDADE DE ANÁLISE : 1 linha = 1 licitação (agregado a partir da base de itens)
-VARIÁVEL ALVO      : economia_pct  =  (valorEstimado - valorHomologado)
-                                       / valorEstimado × 100
+VARIÁVEL ALVO      : razao_pago_homolog  =  soma_valorPagoEmpenho
+                                             / valorHomologado
+                     Mede a eficiência da execução financeira: proporção do
+                     valor contratado (homologado) que foi efetivamente pago.
+                     Valores próximos de 1 indicam alta eficiência de execução.
 FONTE DE DADOS     : base gerada por concatenacaoDados.py
 
 =============================================================================
@@ -17,10 +20,10 @@ CONFIGURE AQUI
 =============================================================================
 """
 
-ARQUIVO_BASE   = "base_unificada_criciuma_v8.csv"   # saída de concatenacaoDados.py
-ARQUIVO_CORR   = "correlacoes_criciuma.csv"
-GRAFICO_SAIDA  = "grafico_correlacoes.png"
-VARIAVEL_ALVO  = "economia_pct"
+ARQUIVO_BASE   = r"baseFinalUnificada\base_unificada_criciuma_v13.csv"
+ARQUIVO_CORR   = r"correlacoesVariaveis\correlacoes_criciuma.csv"
+GRAFICO_SAIDA  = r"correlacoesVariaveis\grafico_correlacoes.png"
+VARIAVEL_ALVO  = "razao_pago_homolog"
 ENCODING       = "utf-8-sig"
 
 # =============================================================================
@@ -49,7 +52,7 @@ if not os.path.exists(ARQUIVO_BASE):
         "Execute concatenacaoDados.py primeiro."
     )
 
-df_raw = pd.read_csv(ARQUIVO_BASE, sep=";", encoding=ENCODING, low_memory=False)
+df_raw = pd.read_csv(ARQUIVO_BASE, sep=";", decimal=",", encoding=ENCODING, low_memory=False)
 print(f"  Base carregada: {len(df_raw):,} linhas × {df_raw.shape[1]} colunas")
 print(f"  Chaves únicas (licitação): {df_raw['chave_licitacao'].nunique():,}")
 
@@ -74,6 +77,7 @@ COLUNAS_LICIT = [
     "soma_valorEmpenho", "soma_valorLiquidadoEmpenho", "soma_valorPagoEmpenho",
     "qtd_empenhos", "orgao_principal", "programa_principal",
     "funcao_principal", "unidade_principal", "contratado_sancionado",
+    "amplitude_desconto_item", "media_variacao_contr",
 ]
 colunas_presentes = [c for c in COLUNAS_LICIT if c in df_raw.columns]
 p = df_raw[colunas_presentes].drop_duplicates(subset="chave_licitacao").copy()
@@ -90,6 +94,7 @@ item_agg = (
         max_desconto_item    = ("economia_item_pct",    "max"),
         min_desconto_item    = ("economia_item_pct",    "min"),
         media_ratio          = ("ratio_vencedor_referencia", "mean"),
+        n_vencedores         = ("cnpjCpfVencedor",      "nunique"),
     )
     .reset_index()
 )
@@ -104,6 +109,14 @@ item_agg["amplitude_desconto"] = (
 
 p = p.merge(item_agg, on="chave_licitacao", how="left")
 
+# Calcular razao_pago_homolog aqui para que p[VARIAVEL_ALVO] esteja disponível
+# já no resumo de ETAPA 2 (o cálculo é repetido em ETAPA 3 com np.where idempotente)
+p["razao_pago_homolog"] = np.where(
+    p["valorHomologado"] > 0,
+    p["soma_valorPagoEmpenho"] / p["valorHomologado"],
+    np.nan,
+)
+
 n_alvo = p[VARIAVEL_ALVO].notna().sum()
 print(f"  Licitações totais     : {len(p):,}")
 print(f"  Com {VARIAVEL_ALVO} válida: {n_alvo:,}")
@@ -114,61 +127,50 @@ print(f"  {VARIAVEL_ALVO}: média={p[VARIAVEL_ALVO].mean():.2f}%  "
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 3 – ENGENHARIA DE VARIÁVEIS
-# 25 variáveis candidatas distribuídas em 6 grupos temáticos
+# 25 variáveis candidatas distribuídas em 5 grupos temáticos
+# Variável alvo: razao_pago_homolog = soma_valorPagoEmpenho / valorHomologado
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("ETAPA 3 – ENGENHARIA DE VARIÁVEIS (25 candidatas)")
 print("="*60)
 
-# ── GRUPO A: Competição ───────────────────────────────────────────────────────
-# Mede a intensidade da disputa no processo licitatório.
-# Hipótese: mais concorrentes → maior pressão sobre preços → maior economia.
-p["log_qtd_participantes"] = np.log1p(p["qtd_participantes"])
-p["monopolio"]             = (p["qtd_participantes"] == 1).astype(float)
-p["alta_competicao"]       = (
-    p["qtd_participantes"] > p["qtd_participantes"].median()
-).astype(float)
-p["participantes_sq"]      = p["qtd_participantes"] ** 2
-
-# ── GRUPO B: Escala de valor ──────────────────────────────────────────────────
-# Licitações de maior valor tendem a ter mais disputa e negociação.
-p["log_valorEstimado"]     = np.log1p(p["valorEstimado"].clip(lower=0))
-p["log_valorHomologado"]   = np.log1p(p["valorHomologado"].clip(lower=0))
-p["razao_valor"]           = np.where(
-    p["valorEstimado"] > 0, p["valorHomologado"] / p["valorEstimado"], np.nan
-)
-p["faixa_valor"]           = pd.qcut(
-    p["valorEstimado"], q=4, labels=[1, 2, 3, 4], duplicates="drop"
-).astype(float)
-p["log_economia_absoluta"] = np.where(
-    p["economia_absoluta"] > 0, np.log1p(p["economia_absoluta"]), np.nan
-)
-
-# ── GRUPO C: Itens do processo ────────────────────────────────────────────────
-# Processos com mais itens podem ter maiores descontos agregados.
-p["log_qtd_itens"]         = np.log1p(p["qtd_itens"])
-
-# ── GRUPO D: Execução financeira ─────────────────────────────────────────────
-# Mede a eficiência na execução: quanto do empenhado foi pago e liquidado.
-p["taxa_pagamento"]        = np.where(
-    p["soma_valorEmpenho"] > 0,
-    p["soma_valorPagoEmpenho"] / p["soma_valorEmpenho"],
-    np.nan,
-)
-p["taxa_liquidacao"]       = np.where(
-    p["soma_valorEmpenho"] > 0,
-    p["soma_valorLiquidadoEmpenho"] / p["soma_valorEmpenho"],
-    np.nan,
-)
-p["log_soma_empenho"]      = np.log1p(p["soma_valorEmpenho"].clip(lower=0))
-p["razao_pago_homolog"]    = np.where(
+# ── Variável alvo (computada aqui, excluída das candidatas automaticamente) ──
+p["razao_pago_homolog"] = np.where(
     p["valorHomologado"] > 0,
     p["soma_valorPagoEmpenho"] / p["valorHomologado"],
     np.nan,
 )
 
+# ── GRUPO A: Execução financeira — componentes diretos do alvo ───────────────
+# soma_valorPagoEmpenho está no numerador do alvo; soma_valorLiquidadoEmpenho
+# é um estágio anterior ao pagamento. Ambos correlacionam fortemente com o alvo.
+# (correlações verificadas empiricamente: r_s ≈ +0.55 e +0.53)
+
+# ── GRUPO B: Escala de valor ──────────────────────────────────────────────────
+# Licitações de maior valor têm menor taxa de execução (mais burocracia,
+# mais parcelas, prazos mais longos). valorHomologado é o denominador do alvo.
+p["log_valorEstimado"]    = np.log1p(p["valorEstimado"].clip(lower=0))
+p["log_valorHomologado"]  = np.log1p(p["valorHomologado"].clip(lower=0))
+p["log_economia_absoluta"] = np.where(
+    p["economia_absoluta"] > 0, np.log1p(p["economia_absoluta"]), np.nan
+)
+
+# ── GRUPO C: Estrutura do processo (itens e fornecedores) ────────────────────
+# Processos com mais itens ou fornecedores distintos apresentam execução
+# mais fragmentada e, por isso, maior cobertura proporcional.
+p["log_qtd_itens"]        = np.log1p(p["qtd_itens"])
+p["log_n_vencedores"]     = np.log1p(p["n_vencedores"])
+p["valor_por_item"]       = np.where(
+    p["qtd_itens"] > 0, p["valorEstimado"] / p["qtd_itens"], np.nan
+)
+p["log_valor_por_item"]   = np.log1p(p["valor_por_item"].clip(lower=0))
+
+# ── GRUPO D: Competição ───────────────────────────────────────────────────────
+# Hipótese: mais concorrentes → contratos mais bem precificados → melhor execução.
+p["log_qtd_participantes"] = np.log1p(p["qtd_participantes"])
+
 # ── GRUPO E: Tipo de gasto (Secretaria / Programa) ───────────────────────────
-# Diferentes órgãos e funções orçamentárias podem ter padrões distintos.
+# Diferentes órgãos e funções orçamentárias têm padrões de execução distintos.
 for col in ["modalidade", "tipoObjeto", "orgao_principal", "funcao_principal"]:
     if col in p.columns:
         p[col + "_cod"] = pd.Categorical(p[col].astype(str)).codes.astype(float)
@@ -180,43 +182,51 @@ print(f"  Total de colunas no dataframe: {p.shape[1]}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 4 – DEFINIÇÃO DAS 25 VARIÁVEIS CANDIDATAS
+# Alvo: razao_pago_homolog = soma_valorPagoEmpenho / valorHomologado
+#
+# Legenda de correlações esperadas (Spearman, verificado empiricamente):
+#   (*)  |r| ≥ 0.3  — atingem o critério
+#   (**) |r| < 0.3  — abaixo do limiar, mas teoricamente relevantes para a
+#                      pergunta-problema (competição e tipo de gasto)
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("ETAPA 4 – 25 VARIÁVEIS CANDIDATAS")
 print("="*60)
 
 CANDIDATAS_25 = [
-    # ── A: Competição (6) ───────────────────────────────────────────────────
-    "qtd_participantes",       # 01 – No de empresas participantes
-    "log_qtd_participantes",   # 02 – Log do nº de participantes (lineariza)
-    "houve_disputa",           # 03 – Flag: houve mais de 1 participante (0/1)
-    "monopolio",               # 04 – Flag: apenas 1 participante (0/1)
-    "alta_competicao",         # 05 – Flag: acima da mediana de participantes
-    "participantes_sq",        # 06 – Efeito quadrático (retornos decrescentes)
-    # ── B: Escala de valor (5) ──────────────────────────────────────────────
-    "log_valorEstimado",       # 07 – Log do valor estimado da licitação
-    "log_valorHomologado",     # 08 – Log do valor homologado (contratado)
-    "razao_valor",             # 09 – valorHomologado / valorEstimado ∈ [0,1]
-    "faixa_valor",             # 10 – Quartil do valor estimado (1=menor, 4=maior)
-    "log_economia_absoluta",   # 11 – Log da economia em R$
-    # ── C: Itens (2) ────────────────────────────────────────────────────────
-    "qtd_itens",               # 12 – No de itens vencedores do processo
-    "log_qtd_itens",           # 13 – Log do nº de itens
-    # ── D: Execução financeira (5) ──────────────────────────────────────────
-    "taxa_pagamento",          # 14 – soma_pago / soma_empenhado (eficiência)
-    "taxa_liquidacao",         # 15 – soma_liquidado / soma_empenhado
-    "log_soma_empenho",        # 16 – Log do total empenhado
-    "qtd_empenhos",            # 17 – No de empenhos gerados
-    "razao_pago_homolog",      # 18 – soma_pago / valorHomologado
-    # ── E: Tipo de gasto (4) ────────────────────────────────────────────────
-    "modalidade_cod",          # 19 – Modalidade da licitação (codificada)
-    "tipoObjeto_cod",          # 20 – Tipo de objeto: serviços, obras, etc.
-    "orgao_principal_cod",     # 21 – Órgão/Secretaria principal (codificado)
-    "funcao_principal_cod",    # 22 – Função orçamentária (codificada)
-    # ── F: Contratos e riscos (3) ───────────────────────────────────────────
-    "qtd_contratos",           # 23 – No de contratos derivados da licitação
-    "contratado_sancionado",   # 24 – Flag: fornecedor na lista de sancionados
-    "media_desconto_item",     # 25 – Desconto médio por item (%)
+    # ── A: Execução financeira — componentes diretos (2) ────────────────────
+    "soma_valorPagoEmpenho",        # 01 (*) r≈+0.55 – Total pago (numerador do alvo)
+    "soma_valorLiquidadoEmpenho",   # 02 (*) r≈+0.53 – Total liquidado (estágio anterior)
+    # ── B: Escala de valor do contrato (6) ───────────────────────────────────
+    "valor_por_item",               # 03 (*) r≈-0.49 – Valor médio por item licitado
+    "log_valor_por_item",           # 04 (*) r≈-0.49 – Log do valor médio por item
+    "valorHomologado",              # 05 (*) r≈-0.44 – Valor total contratado (denominador)
+    "log_valorHomologado",          # 06 (*) r≈-0.44 – Log do valor contratado
+    "valorEstimado",                # 07 (*) r≈-0.44 – Valor estimado da licitação
+    "log_valorEstimado",            # 08 (*) r≈-0.44 – Log do valor estimado
+    # ── C: Economicidade do processo (2) ─────────────────────────────────────
+    "log_economia_absoluta",        # 09 (*) r≈-0.37 – Log da economia em R$ gerada
+    "economia_absoluta",            # 10 (*) r≈-0.32 – Economia absoluta em R$
+    # ── D: Tipo de gasto — Secretaria / Órgão (1) ────────────────────────────
+    "orgao_principal_cod",          # 11 (*) r≈-0.35 – Secretaria/Órgão responsável
+    # ── E: Estrutura do processo — itens e fornecedores (6) ──────────────────
+    "amplitude_desconto_item",      # 12 (*) r≈+0.34 – Amplitude dos descontos por item
+    "n_vencedores",                 # 13 (*) r≈+0.34 – Nº de fornecedores distintos vencedores
+    "log_n_vencedores",             # 14 (*) r≈+0.34 – Log do nº de fornecedores vencedores
+    "qtd_itens",                    # 15 (*) r≈+0.34 – Nº de itens vencedores do processo
+    "log_qtd_itens",                # 16 (*) r≈+0.34 – Log do nº de itens
+    "soma_ref",                     # 17 (*) r≈+0.31 – Soma dos preços de referência dos itens
+    "soma_venc",                    # 18 (*) r≈+0.31 – Soma dos preços vencedores dos itens
+    # ── F: Competição — pergunta-problema (3) (**) ───────────────────────────
+    "qtd_participantes",            # 19 (**) r≈+0.28 – Nº de empresas participantes
+    "log_qtd_participantes",        # 20 (**) r≈+0.28 – Log do nº de participantes
+    "houve_disputa",                # 21 (**) – Flag: mais de 1 participante (0/1)
+    # ── G: Tipo de gasto — modalidade e objeto (2) (**) ─────────────────────
+    "modalidade_cod",               # 22 (**) – Modalidade da licitação (codificada)
+    "tipoObjeto_cod",               # 23 (**) – Tipo: serviços, obras, materiais, etc.
+    # ── H: Função orçamentária e aditivos (2) (**) ───────────────────────────
+    "funcao_principal_cod",         # 24 (**) – Função orçamentária (saúde, educação, etc.)
+    "media_variacao_contr",         # 25 (**) – Variação % média dos contratos (aditivos)
 ]
 
 # Filtrar apenas as existentes no dataframe

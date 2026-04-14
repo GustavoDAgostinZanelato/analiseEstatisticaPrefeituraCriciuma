@@ -1,6 +1,6 @@
 """
 =============================================================================
-UNIFICACAO DE BASES - PORTAL DA TRANSPARENCIA CRICIUMA (v8)
+UNIFICACAO DE BASES - PORTAL DA TRANSPARENCIA CRICIUMA (v10)
 =============================================================================
 Pergunta problema:
   "Qual o impacto da competicao (numero de participantes) e do tipo de gasto
@@ -34,6 +34,37 @@ CORRECOES v8 (sobre v7)
     depois adicione uma entrada em CONFIGURACAO_ANOS abaixo.
 
 =============================================================================
+NOVIDADES v9/v10 - 6 VARIAVEIS CANDIDATAS ADICIONADAS
+=============================================================================
+
+  Variaveis derivadas de fontes ja existentes, incorporadas diretamente
+  ao pipeline para enriquecer as correlacoes em calcularCorrelacoes.py:
+
+  [VAR #1 - dias_tramitacao]
+    Dias entre dataPublicacao e dataHomologacao da licitacao.
+    Hipotese: processos com menor competicao tramitam mais rapido.
+
+  [VAR #2 - log_dias_tramitacao]
+    log(dias_tramitacao + 1). Reduz assimetria positiva de dias_tramitacao.
+
+  [VAR #3 - media_variacao_contr]
+    (media_valorFinal - media_valorInicial) / media_valorInicial * 100.
+    Percentual medio de variacao (aditivos) dos contratos da licitacao.
+
+  [VAR #4 - interact_part_logval]
+    qtd_participantes * log(valorEstimado + 1).
+    Captura se o efeito da competicao e maior em contratos de alto valor.
+
+  [VAR #5 - formaJulgamento_cod]
+    Codificacao categorica de formaJulgamento (menor preco, melhor tecnica,
+    tecnica e preco, etc). Diferente de modalidade e tipo de objeto.
+
+  [VAR #6 - amplitude_desconto_item / media_desconto_item]
+    Amplitude = max(economia_item_pct) - min(economia_item_pct) por licitacao.
+    Media = media dos descontos por item. Ambas indicam heterogeneidade dos
+    precos ofertados pelos vencedores.
+
+=============================================================================
 CONFIGURE AQUI ANTES DE RODAR
 =============================================================================
 """
@@ -52,15 +83,15 @@ BASE_DIR = r'C:\Users\gusta\Documents\Git Hub\analiseEstatísticaPrefeituraCrici
 #   3. Adicione uma nova entrada aqui com os caminhos gerados pelo script.py
 # =============================================================================
 CONFIGURACAO_ANOS = [
-    # {
-    #     "ano": "2019",
-    #     "processos_licitatorios": os.path.join(BASE_DIR, "Processos Licitatórios-2019"),
-    #     "processos_finalizados":  os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2019"),
-    #     "dispensa":               os.path.join(BASE_DIR, "Dispensa de Licitação-2019"),
-    #     "inexigibilidade":        os.path.join(BASE_DIR, "Inexigibilidade de Licitação-2019"),
-    #     "contratos":              os.path.join(BASE_DIR, "Relação de Contratos-2019"),
-    #     "despesas":               os.path.join(BASE_DIR, "Execução Detalhada de Despesas-2019"),
-    # },
+    {
+        "ano": "2019",
+        "processos_licitatorios": os.path.join(BASE_DIR, "Processos Licitatórios-2019"),
+        "processos_finalizados":  os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2019"),
+        "dispensa":               os.path.join(BASE_DIR, "Dispensa de Licitação-2019"),
+        "inexigibilidade":        os.path.join(BASE_DIR, "Inexigibilidade de Licitação-2019"),
+        "contratos":              os.path.join(BASE_DIR, "Relação de Contratos-2019"),
+        "despesas":               os.path.join(BASE_DIR, "Execução Detalhada de Despesas-2019"),
+    },
     # Descomente e ajuste para adicionar outro ano apos rodar script.py:
     {
         "ano": "2020",
@@ -74,7 +105,7 @@ CONFIGURACAO_ANOS = [
 ]
 
 PASTA_SANCIONADOS = os.path.join(BASE_DIR, "Fornecedores sancionados")
-ARQUIVO_SAIDA     = "base_unificada_criciuma_v9.csv"
+ARQUIVO_SAIDA     = "baseFinalUnificada/base_unificada_criciuma_v13.csv"
 ENCODING          = "utf-8"
 
 # Derivar variaveis de compatibilidade para o restante do codigo
@@ -326,6 +357,25 @@ df_processos["economia_pct"] = np.where(
 )
 print(f"  Chaves unicas: {df_processos['chave_licitacao'].nunique():,}")
 
+# VAR #1 e #2: dias_tramitacao e log_dias_tramitacao
+# dataPublicacao e dataHomologacao existem no df_27 de todas as pastas de processos.
+for _col_dt in ["dataPublicacao", "dataHomologacao"]:
+    if _col_dt in df_processos.columns:
+        df_processos[_col_dt] = pd.to_datetime(
+            df_processos[_col_dt], errors="coerce", utc=True
+        )
+        df_processos[_col_dt] = df_processos[_col_dt].dt.tz_convert(None)
+
+if {"dataPublicacao", "dataHomologacao"}.issubset(df_processos.columns):
+    df_processos["dias_tramitacao"] = (
+        df_processos["dataHomologacao"] - df_processos["dataPublicacao"]
+    ).dt.days.clip(lower=0)
+    df_processos["log_dias_tramitacao"] = np.log1p(df_processos["dias_tramitacao"])
+    _validos_dt = df_processos["dias_tramitacao"].notna().sum()
+    print(f"  dias_tramitacao calculados: {_validos_dt:,} de {len(df_processos):,}")
+else:
+    print("  [AVISO] dataPublicacao ou dataHomologacao ausentes - dias_tramitacao ignorado.")
+
 
 # -----------------------------------------------------------------------------
 # ETAPA 3 - PREPARACAO DO df_contratos
@@ -467,6 +517,17 @@ else:
           f"{preenchidos:,} de {len(df_processos):,} licitacoes "
           f"({preenchidos/len(df_processos)*100:.1f}%)")
 
+    # VAR #3: media_variacao_contr - variacao percentual media dos contratos
+    if {"media_valorInicial", "media_valorFinal"}.issubset(df_processos.columns):
+        df_processos["media_variacao_contr"] = np.where(
+            df_processos["media_valorInicial"] > 0,
+            (df_processos["media_valorFinal"] - df_processos["media_valorInicial"])
+            / df_processos["media_valorInicial"] * 100,
+            np.nan
+        )
+        _validos_vc = df_processos["media_variacao_contr"].notna().sum()
+        print(f"  media_variacao_contr calculada: {_validos_vc:,} licitacoes")
+
 
 # -----------------------------------------------------------------------------
 # ETAPA 4 - CONTAGEM DE PARTICIPANTES
@@ -522,6 +583,25 @@ else:
             print(df_processos["qtd_participantes"].value_counts().sort_index().head(10).to_string())
 
     df_processos["houve_disputa"] = (df_processos["qtd_participantes"] > 1).astype(int)
+
+# VAR #4: interact_part_logval - interacao entre competicao e escala de valor
+if "valorEstimado" in df_processos.columns:
+    df_processos["interact_part_logval"] = (
+        df_processos["qtd_participantes"]
+        * np.log1p(df_processos["valorEstimado"].clip(lower=0))
+    )
+    print(f"  interact_part_logval calculado: "
+          f"{df_processos['interact_part_logval'].notna().sum():,} licitacoes")
+
+# VAR #5: formaJulgamento_cod - codificacao categorica de formaJulgamento
+if "formaJulgamento" in df_processos.columns:
+    df_processos["formaJulgamento_cod"] = (
+        pd.Categorical(df_processos["formaJulgamento"].astype(str)).codes.astype(float)
+    )
+    df_processos.loc[df_processos["formaJulgamento"].isna(), "formaJulgamento_cod"] = np.nan
+    _cats_fj = df_processos["formaJulgamento"].dropna().unique()
+    print(f"  formaJulgamento_cod: {len(_cats_fj)} categorias: "
+          f"{sorted(str(c) for c in _cats_fj)}")
 
 
 # -----------------------------------------------------------------------------
@@ -748,11 +828,19 @@ else:
 
     # FIX #2a: chave direta via coluna 'numero' (numeroLicitacao do item)
     if "numero" in df_venc.columns:
-        # Inferir ano: todos os dados sao de 2019
-        df_venc["chave_licitacao"] = (
-            df_venc["numero"].apply(limpar_chave) + "_2019"
+        # Inferir ano a partir do campo _fonte (ex: 'licit_2020' -> '2020').
+        # FIX #9: antes estava fixo em '_2019', corrompendo todos os itens de 2020.
+        _num_venc = df_venc["numero"].apply(limpar_chave)
+        if "_fonte" in df_venc.columns:
+            _ano_venc = df_venc["_fonte"].str.extract(r"(\d{4})$")[0].fillna("2019")
+        else:
+            _ano_venc = "2019"
+        df_venc["chave_licitacao"] = _num_venc + "_" + _ano_venc
+        # Limpar chaves onde numero estava vazio (resultado seria "_YYYY")
+        df_venc["chave_licitacao"] = df_venc["chave_licitacao"].where(
+            _num_venc.ne("") & _num_venc.notna(), other=None
         )
-        df_venc["chave_licitacao"] = df_venc["chave_licitacao"].replace({"_2019": None, "": None})
+        df_venc["chave_licitacao"] = df_venc["chave_licitacao"].replace({"": None})
 
         direto = df_venc["chave_licitacao"].notna().sum()
         print(f"  Itens com chave_licitacao direta (via 'numero'): "
@@ -783,6 +871,18 @@ else:
         print(f"  Itens vinculados apos fallback CNPJ: "
               f"{df_venc['chave_licitacao'].notna().sum():,} de {len(df_venc):,}")
 
+    # FIX #9b: Deduplicar itens vencedores antes do merge.
+    # Alguns itens aparecem em multiplos arquivos UUID do portal com valores ligeiramente
+    # diferentes. O concat coloca 'finalizado' depois de 'licit', entao keep='last'
+    # privilegia as entradas de Processos Finalizados (resultado mais definitivo).
+    _key_venc_dedup = [c for c in ["chave_licitacao", "codigo", "cnpjCpfVencedor", "numero"]
+                       if c in df_venc.columns]
+    if _key_venc_dedup:
+        _antes_vd = len(df_venc)
+        df_venc = df_venc.drop_duplicates(subset=_key_venc_dedup, keep="last")
+        print(f"  Duplicatas removidas de df_venc: {_antes_vd - len(df_venc):,} | "
+              f"Restaram: {len(df_venc):,}")
+
     diagnostico_merge(
         "itensvencedores -> processos",
         set(df_venc["chave_licitacao"].dropna()) - {""},
@@ -802,6 +902,32 @@ else:
         df_venc["valorTotalVencedor"] / df_venc["valorTotalReferencia"],
         np.nan
     )
+
+    # VAR #6: amplitude_desconto_item e media_desconto_item
+    # Agrega economia_item_pct ao nivel da licitacao e junta em df_processos.
+    # FIX #10: alguns itens do portal registram valorTotalReferencia = 1,00 como
+    # placeholder (ex.: contratos de uso de espacos culturais), gerando
+    # economia_item_pct na casa de -679.000%. Esses outliers distorcem
+    # amplitude_desconto_item para milhoes de pontos percentuais.
+    # Solucao: clipar economia_item_pct em [-100, 100] antes de agregar,
+    # preservando descontos validos e descartando artefatos de dados.
+    if "chave_licitacao" in df_venc.columns and "economia_item_pct" in df_venc.columns:
+        _venc_desc = df_venc.dropna(subset=["economia_item_pct", "chave_licitacao"]).copy()
+        _venc_desc["economia_item_pct"] = _venc_desc["economia_item_pct"].clip(-100, 100)
+        if not _venc_desc.empty:
+            agg_desc = (_venc_desc
+                        .groupby("chave_licitacao")
+                        .agg(
+                            media_desconto_item     = ("economia_item_pct", "mean"),
+                            amplitude_desconto_item = ("economia_item_pct",
+                                                       lambda x: x.max() - x.min()),
+                        )
+                        .reset_index())
+            df_processos = df_processos.merge(agg_desc, on="chave_licitacao", how="left")
+            print(f"  media_desconto_item calculada: "
+                  f"{df_processos['media_desconto_item'].notna().sum():,} licitacoes")
+            print(f"  amplitude_desconto_item calculada: "
+                  f"{df_processos['amplitude_desconto_item'].notna().sum():,} licitacoes")
 
 
 # -----------------------------------------------------------------------------
@@ -823,6 +949,12 @@ colunas_processos = [c for c in [
     "qtd_empenhos", "orgao_principal", "programa_principal",
     "funcao_principal", "unidade_principal",
     "contratado_sancionado",
+    # Variaveis adicionadas (v10)
+    "dias_tramitacao", "log_dias_tramitacao",
+    "media_variacao_contr",
+    "interact_part_logval",
+    "formaJulgamento_cod",
+    "media_desconto_item", "amplitude_desconto_item",
 ] if c in df_processos.columns]
 
 if df_venc.empty or "chave_licitacao" not in df_venc.columns:
@@ -863,20 +995,28 @@ print("\n" + "="*60)
 print("ETAPA 9 - EXPORTACAO")
 print("="*60)
 
-# FIX #5: arredondar colunas monetarias para 2 casas antes de exportar,
-# evitando notacao "451201500000000" causada por float_format="%.10f"
-# com separador '.' em locale BR (Excel interpreta '.' como milhar).
-cols_monetarias = [c for c in base_final.columns if any(
-    kw in c for kw in ["valor", "economia", "media", "soma", "ratio"]
-)]
-for c in cols_monetarias:
-    if pd.api.types.is_float_dtype(base_final[c]):
+# FIX #5 / FIX #11: arredondar todas as colunas float antes de exportar.
+#   - Colunas monetarias e percentuais: 2 casas decimais
+#   - Demais floats (logs, indices, flags): 6 casas decimais
+# Isso evita que Python grave 16 digitos significativos (ex.: 2.9444389791664403),
+# que o Excel em locale pt-BR interpreta como inteiro gigante ao tratar '.' como
+# separador de milhar.
+# O separador decimal e ',' (padrao BR) para compatibilidade nativa com Excel.
+KEYWORDS_2 = ["valor", "economia", "media", "soma", "ratio", "desconto",
+              "variacao", "pago", "liquidado", "empenho"]
+for c in base_final.columns:
+    if not pd.api.types.is_float_dtype(base_final[c]):
+        continue
+    if any(kw in c.lower() for kw in KEYWORDS_2):
         base_final[c] = base_final[c].round(2)
+    else:
+        base_final[c] = base_final[c].round(6)
 
 base_final.to_csv(
     ARQUIVO_SAIDA,
     index=False,
     sep=";",
+    decimal=",",
     encoding="utf-8-sig"
 )
 print(f"\n  OK Arquivo salvo: {os.path.abspath(ARQUIVO_SAIDA)}")
@@ -901,6 +1041,9 @@ cols_resumo = [c for c in [
     "media_dias_vigencia", "qtd_contratos",
     "soma_valorEmpenho", "soma_valorLiquidadoEmpenho", "soma_valorPagoEmpenho",
     "qtd_empenhos", "contratado_sancionado",
+    "dias_tramitacao", "log_dias_tramitacao",
+    "media_variacao_contr", "interact_part_logval",
+    "formaJulgamento_cod", "media_desconto_item", "amplitude_desconto_item",
 ] if c in base_final.columns]
 
 if cols_resumo:

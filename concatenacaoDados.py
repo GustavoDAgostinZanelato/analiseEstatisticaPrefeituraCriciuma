@@ -72,7 +72,11 @@ CONFIGURE AQUI ANTES DE RODAR
 import os
 
 # Diretorio raiz dos dados ja unificados pelo script.py
-BASE_DIR = r'C:\Users\gusta\Documents\Git Hub\analiseEstatísticaPrefeituraCriciuma\dadosUnificados'
+# Caminho relativo ao arquivo deste script (portavel entre maquinas).
+BASE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "dadosUnificados",
+)
 
 # =============================================================================
 # CONFIGURACAO DE ANOS
@@ -980,9 +984,33 @@ else:
         total = len(base_final)
         print(f"  Itens com dados da licitacao pai: {vinc:,} de {total:,} ({vinc/total*100:.1f}%)")
 
+# -----------------------------------------------------------------------------
+# FILTRO DE CONSISTENCIA PARA CALCULO DO ALVO
+# -----------------------------------------------------------------------------
+# Mantem apenas itens onde as tres colunas criticas para o calculo do alvo
+# estao preenchidas. Isso alinha ratio_vencedor_referencia (nivel item),
+# valorEstimado e valorHomologado (nivel licitacao), garantindo que cada
+# linha contribua de forma consistente para a analise de razao_pago_homolog.
+COLUNAS_CONSISTENCIA = [
+    "ratio_vencedor_referencia",
+    "valorEstimado",
+    "valorHomologado",
+]
+cols_ok = [c for c in COLUNAS_CONSISTENCIA if c in base_final.columns]
+if len(cols_ok) == len(COLUNAS_CONSISTENCIA):
+    antes = len(base_final)
+    base_final = base_final.dropna(subset=cols_ok).reset_index(drop=True)
+    removidas = antes - len(base_final)
+    print(f"\n  Filtro de consistencia ({', '.join(cols_ok)}):")
+    print(f"    Removidas: {removidas:,} linhas com nulos em alguma das 3 colunas")
+    print(f"    Restantes: {len(base_final):,} linhas")
+else:
+    faltam = [c for c in COLUNAS_CONSISTENCIA if c not in base_final.columns]
+    print(f"  [AVISO] Filtro de consistencia pulado: colunas ausentes {faltam}")
+
 print(f"\n  Base final: {len(base_final):,} linhas | {base_final.shape[1]} colunas")
 if len(base_final) < 20_000:
-    print(f"  ATENCAO: abaixo da meta de 20.000 linhas.")
+    print(f"  ATENCAO: abaixo da meta de 20.000 linhas (adicione mais anos).")
 else:
     print(f"  OK Meta de 20.000 linhas atingida!")
 

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe calcularCorrelacoes.py)",
+      "Bash(.venv/Scripts/pip.exe install *)",
+      "Bash(.venv/Scripts/python.exe concatenacaoDados.py)"
+    ]
+  }
+}

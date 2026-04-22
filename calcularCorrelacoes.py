@@ -59,10 +59,11 @@ print(f"  Chaves únicas (licitação): {df_raw['chave_licitacao'].nunique():,}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 2 – AGREGAÇÃO AO NÍVEL DA LICITAÇÃO
-# A base está no nível de item vencedor; para correlações com economia_pct
-# (que é uma propriedade da licitação, não do item), agregamos para 1 linha
-# por licitação.  Variáveis de licitação (já repetidas por item) usam first();
-# variáveis de item usam agregações (média, soma, contagem).
+# A base está no nível de item vencedor; para correlações com o alvo
+# (razao_pago_homolog — propriedade da licitação, não do item), agregamos
+# para 1 linha por licitação.  Variáveis de licitação (já repetidas por
+# item) usam drop_duplicates; variáveis de item usam agregações
+# (média, soma, contagem).
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("ETAPA 2 – AGREGAÇÃO AO NÍVEL DA LICITAÇÃO")
@@ -127,11 +128,12 @@ print(f"  {VARIAVEL_ALVO}: média={p[VARIAVEL_ALVO].mean():.2f}%  "
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 3 – ENGENHARIA DE VARIÁVEIS
-# 25 variáveis candidatas distribuídas em 5 grupos temáticos
-# Variável alvo: razao_pago_homolog = soma_valorPagoEmpenho / valorHomologado
+# Cria transformações e codificações a partir das colunas da base.
+# A separação entre "preditores válidos" e "componentes do alvo" ocorre
+# apenas em ETAPA 4 — aqui as variáveis são todas computadas.
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
-print("ETAPA 3 – ENGENHARIA DE VARIÁVEIS (25 candidatas)")
+print("ETAPA 3 – ENGENHARIA DE VARIÁVEIS")
 print("="*60)
 
 # ── Variável alvo (computada aqui, excluída das candidatas automaticamente) ──
@@ -141,23 +143,19 @@ p["razao_pago_homolog"] = np.where(
     np.nan,
 )
 
-# ── GRUPO A: Execução financeira — componentes diretos do alvo ───────────────
-# soma_valorPagoEmpenho está no numerador do alvo; soma_valorLiquidadoEmpenho
-# é um estágio anterior ao pagamento. Ambos correlacionam fortemente com o alvo.
-# (correlações verificadas empiricamente: r_s ≈ +0.55 e +0.53)
-
-# ── GRUPO B: Escala de valor ──────────────────────────────────────────────────
-# Licitações de maior valor têm menor taxa de execução (mais burocracia,
-# mais parcelas, prazos mais longos). valorHomologado é o denominador do alvo.
+# ── Escala de valor (logs) ───────────────────────────────────────────────────
+# Observação: valorEstimado, valorHomologado e economia_absoluta (e seus logs)
+# são COMPONENTES do alvo — calculados aqui apenas para o bloco de diagnóstico.
 p["log_valorEstimado"]    = np.log1p(p["valorEstimado"].clip(lower=0))
 p["log_valorHomologado"]  = np.log1p(p["valorHomologado"].clip(lower=0))
 p["log_economia_absoluta"] = np.where(
     p["economia_absoluta"] > 0, np.log1p(p["economia_absoluta"]), np.nan
 )
 
-# ── GRUPO C: Estrutura do processo (itens e fornecedores) ────────────────────
+# ── Estrutura do processo (itens e fornecedores) ─────────────────────────────
 # Processos com mais itens ou fornecedores distintos apresentam execução
-# mais fragmentada e, por isso, maior cobertura proporcional.
+# mais fragmentada e, em tese, maior cobertura proporcional.
+# valor_por_item também é componente (contém valorEstimado) — diagnóstico.
 p["log_qtd_itens"]        = np.log1p(p["qtd_itens"])
 p["log_n_vencedores"]     = np.log1p(p["n_vencedores"])
 p["valor_por_item"]       = np.where(
@@ -165,13 +163,15 @@ p["valor_por_item"]       = np.where(
 )
 p["log_valor_por_item"]   = np.log1p(p["valor_por_item"].clip(lower=0))
 
-# ── GRUPO D: Competição ───────────────────────────────────────────────────────
-# Hipótese: mais concorrentes → contratos mais bem precificados → melhor execução.
+# ── Competição ───────────────────────────────────────────────────────────────
+# Hipótese: mais concorrentes → contratos melhor precificados → melhor execução.
 p["log_qtd_participantes"] = np.log1p(p["qtd_participantes"])
 
-# ── GRUPO E: Tipo de gasto (Secretaria / Programa) ───────────────────────────
+# ── Tipo de gasto (Secretaria / Programa / Modalidade) ───────────────────────
 # Diferentes órgãos e funções orçamentárias têm padrões de execução distintos.
-for col in ["modalidade", "tipoObjeto", "orgao_principal", "funcao_principal"]:
+for col in ["modalidade", "tipoObjeto", "formaJulgamento",
+            "orgao_principal", "funcao_principal",
+            "programa_principal", "unidade_principal"]:
     if col in p.columns:
         p[col + "_cod"] = pd.Categorical(p[col].astype(str)).codes.astype(float)
         p.loc[p[col].isna(), col + "_cod"] = np.nan
@@ -184,10 +184,16 @@ print(f"  Total de colunas no dataframe: {p.shape[1]}")
 # ETAPA 4 – DEFINIÇÃO DAS 25 VARIÁVEIS CANDIDATAS
 # Alvo: razao_pago_homolog = soma_valorPagoEmpenho / valorHomologado
 #
-# Legenda de correlações esperadas (Spearman, verificado empiricamente):
+# Legenda:
 #   (*)  |r| ≥ 0.3  — atingem o critério
 #   (**) |r| < 0.3  — abaixo do limiar, mas teoricamente relevantes para a
 #                      pergunta-problema (competição e tipo de gasto)
+#
+# NOTA DE TRANSPARÊNCIA:
+#   Parte das variáveis (soma_valorPagoEmpenho, valorHomologado, valorEstimado
+#   e derivadas) são componentes matemáticos do alvo — as correlações fortes
+#   observadas nelas refletem parcialmente essa relação por construção.
+#   Mantidas na lista para análise descritiva completa do conjunto candidato.
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "="*60)
 print("ETAPA 4 – 25 VARIÁVEIS CANDIDATAS")
@@ -229,7 +235,6 @@ CANDIDATAS_25 = [
     "media_variacao_contr",         # 25 (**) – Variação % média dos contratos (aditivos)
 ]
 
-# Filtrar apenas as existentes no dataframe
 candidatas = [c for c in CANDIDATAS_25 if c in p.columns and c != VARIAVEL_ALVO]
 print(f"  Candidatas disponíveis: {len(candidatas)} de {len(CANDIDATAS_25)}")
 if len(candidatas) < len(CANDIDATAS_25):
@@ -244,45 +249,66 @@ print("\n" + "="*60)
 print("ETAPA 5 – CORRELAÇÕES COM  " + VARIAVEL_ALVO)
 print("="*60)
 
-resultados = []
-for col in candidatas:
-    par = p[[VARIAVEL_ALVO, col]].dropna()
-    n = len(par)
-    if n < 30:
-        print(f"  [SKIP] {col}: apenas {n} pares — insuficiente.")
-        continue
-    r_p, p_p = stats.pearsonr(par[VARIAVEL_ALVO], par[col])
-    r_s, p_s = stats.spearmanr(par[VARIAVEL_ALVO], par[col])
-    bem = (abs(r_p) >= 0.3) or (abs(r_s) >= 0.3)
-    resultados.append({
-        "variavel":          col,
-        "pearson":           round(r_p, 4),
-        "p_pearson":         round(p_p, 4),
-        "spearman":          round(r_s, 4),
-        "p_spearman":        round(p_s, 4),
-        "n":                 n,
-        "bem_correlacionada": bem,
-    })
+# ─── Aviso sobre viés de seleção ────────────────────────────────────────────
+n_total = len(p)
+n_alvo  = int(p[VARIAVEL_ALVO].notna().sum())
+pct_alvo = n_alvo / n_total * 100 if n_total else 0.0
+print(f"  Alvo disponível em {n_alvo}/{n_total} licitações ({pct_alvo:.1f}%)")
+if pct_alvo < 30:
+    print("  [ATENCAO] Viés de seleção: menos de 30% das licitações têm o")
+    print("            alvo calculável. As correlações refletem apenas o")
+    print("            subconjunto com empenho + homologação registrados,")
+    print("            que pode não ser representativo do total.")
 
+
+def _corr_table(cols):
+    out = []
+    for col in cols:
+        par = p[[VARIAVEL_ALVO, col]].dropna()
+        n = len(par)
+        if n < 30:
+            print(f"  [SKIP] {col}: apenas {n} pares — insuficiente.")
+            continue
+        if par[col].nunique() < 2:
+            print(f"  [SKIP] {col}: sem variação.")
+            continue
+        r_p, p_p = stats.pearsonr(par[VARIAVEL_ALVO], par[col])
+        r_s, p_s = stats.spearmanr(par[VARIAVEL_ALVO], par[col])
+        bem = (abs(r_p) >= 0.3) or (abs(r_s) >= 0.3)
+        out.append({
+            "variavel":          col,
+            "pearson":           round(r_p, 4),
+            "p_pearson":         round(p_p, 4),
+            "spearman":          round(r_s, 4),
+            "p_spearman":        round(p_s, 4),
+            "n":                 n,
+            "bem_correlacionada": bem,
+        })
+    return pd.DataFrame(out)
+
+
+def _imprime(df, titulo):
+    print(f"\n  {titulo}")
+    print(f"  {'No':<3}  {'Variavel':<28}  {'Pearson':>8}  {'Spearman':>9}  "
+          f"{'N':>6}  {'|r|>=0.3?':>9}")
+    print("  " + "-"*72)
+    for idx, row in df.iterrows():
+        flag = "   SIM" if row["bem_correlacionada"] else "   NAO"
+        print(f"  {int(idx):<3}  {row['variavel']:<28}  {row['pearson']:>8.4f}  "
+              f"{row['spearman']:>9.4f}  {int(row['n']):>6}{flag}")
+
+
+# ─── Análise das 25 candidatas ──────────────────────────────────────────────
 df_corr = (
-    pd.DataFrame(resultados)
+    _corr_table(candidatas)
     .sort_values("spearman", key=abs, ascending=False)
     .reset_index(drop=True)
 )
 df_corr.index += 1
-
-n_bem = df_corr["bem_correlacionada"].sum()
+n_bem = int(df_corr["bem_correlacionada"].sum())
 total = len(df_corr)
-
-print(f"\n  {'No':<3}  {'Variavel':<28}  {'Pearson':>8}  {'Spearman':>9}  "
-      f"{'N':>6}  {'|r|>=0.3?':>9}")
-print("  " + "-"*72)
-for _, row in df_corr.iterrows():
-    flag = "   SIM" if row["bem_correlacionada"] else "   NAO"
-    print(f"  {int(_):<3}  {row['variavel']:<28}  {row['pearson']:>8.4f}  "
-          f"{row['spearman']:>9.4f}  {int(row['n']):>6}{flag}")
-
-print("\n" + "-"*50)
+_imprime(df_corr, f"RESULTADO — {total} variaveis candidatas")
+print("\n  " + "-"*50)
 print(f"  Variaveis com |r| >= 0.3 : {n_bem:>3} de {total}")
 CRITERIO = n_bem >= 15
 print(f"  Criterio (>= 15)         : {'ATENDIDO' if CRITERIO else ' NAO ATENDIDO'}")
@@ -298,8 +324,7 @@ if not CRITERIO:
     print()
     print("  RECOMENDACAO: adicione dados de outro ano em CONFIGURACAO_ANOS")
     print("  (concatenacaoDados.py) para ampliar a amostra e aumentar o")
-    print("  poder estatistico. Com >=800 licitacoes, as variaveis proximas")
-    print("  de 0.3 deverao cruzar o limiar.")
+    print("  poder estatistico.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,9 +374,10 @@ for bar, val in zip(bars, df_corr["spearman"][::-1]):
 
 ax.set_xlabel("Correlação de Spearman", fontsize=11)
 ax.set_title(
-    f"Correlação com '{VARIAVEL_ALVO}' (n≈{int(df_corr['n'].median())} licitações)\n"
-    f"Variaveis com |r|>=0.3: {n_bem}/{total}",
-    fontsize=12,
+    f"Correlação com '{VARIAVEL_ALVO}' "
+    f"(n≈{int(df_corr['n'].median())} licitações, {pct_alvo:.1f}% da base)\n"
+    f"Variáveis com |r|>=0.3: {n_bem}/{total}",
+    fontsize=11,
 )
 ax.legend(title="Limiar |r|=0.3", loc="lower right")
 ax.set_xlim(

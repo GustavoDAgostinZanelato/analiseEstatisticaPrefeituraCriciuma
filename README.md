@@ -1,8 +1,7 @@
 # Análise Estatística — Portal da Transparência de Criciúma
 
 Projeto de extensão universitária para a disciplina de **Estatística**.
-Os dados foram obtidos do [Portal da Transparência da Prefeitura de Criciúma](https://transparencia.betha.cloud/#/n4W91vnHptoBkiHKAxioOA==/dados-abertos?esconderCabecalho=S&esconderMenu=S&esconderRodape=S
-).
+Os dados foram obtidos do [Portal da Transparência da Prefeitura de Criciúma](https://transparencia.betha.cloud/#/n4W91vnHptoBkiHKAxioOA==/dados-abertos?esconderCabecalho=S&esconderMenu=S&esconderRodape=S).
 
 ## Pergunta-problema
 
@@ -11,7 +10,7 @@ Os dados foram obtidos do [Portal da Transparência da Prefeitura de Criciúma](
 ## Estrutura do projeto
 
 ```
-analiseEstatísticaPrefeituraCriciuma/
+analiseEstatisticaPrefeituraCriciuma/
 │
 ├── script.py                  # Etapa 1 — pré-processa cada pasta baixada do portal
 ├── concatenacaoDados.py       # Etapa 2 — unifica todas as fontes em uma base final
@@ -96,13 +95,23 @@ Gera a tabela `correlacoesVariaveis/correlacoes_criciuma.csv` e o gráfico `graf
 | Característica | Valor |
 |---|---|
 | Unidade de análise | 1 linha = 1 item vencedor de licitação |
-| Total de registros | 21.895 |
+| Total de registros | 11.404 (após filtro de consistência) |
 | Total de colunas | 48 |
-| Licitações únicas | 5.990 |
-| Anos cobertos | 2019 e 2020 |
+| Licitações únicas | 444 |
+| Anos cobertos | 2019 e 2020 (ampliar com anos adicionais para atingir ≥ 20 mil) |
 | Separador de campo | `;` |
 | Separador decimal | `,` (padrão pt-BR, compatível com Excel) |
 | Encoding | UTF-8 com BOM (`utf-8-sig`) |
+
+### Filtro de consistência aplicado
+
+Antes da exportação, `concatenacaoDados.py` remove linhas em que **qualquer uma** das três colunas críticas para o cálculo do alvo esteja nula:
+
+- `ratio_vencedor_referencia` (nível item — validade dos preços ofertados)
+- `valorEstimado` (nível licitação — denominador indireto)
+- `valorHomologado` (nível licitação — **denominador do alvo**)
+
+Isso garante que **cada linha contribua de forma consistente** para a análise de `razao_pago_homolog`, alinhando as três granularidades. O filtro removeu 10.491 de 21.895 linhas (48 %) — principalmente itens de dispensas/inexigibilidades e licitações sem homologação registrada no portal. Para atingir a meta de ≥ 20 mil registros, inclua mais anos em `CONFIGURACAO_ANOS` de `concatenacaoDados.py`.
 
 ### Dicionário de colunas
 
@@ -192,34 +201,61 @@ Gera a tabela `correlacoesVariaveis/correlacoes_criciuma.csv` e o gráfico `graf
 
 **`razao_pago_homolog`** = `soma_valorPagoEmpenho / valorHomologado`
 
-Mede a **eficiência da execução financeira**: proporção do valor contratado que foi efetivamente pago. Disponível para 424 licitações (das 5.990 com dados de empenho e homologação).
+Mede a **eficiência da execução financeira**: proporção do valor contratado que foi efetivamente pago.
+
+### Cobertura do alvo na base filtrada
+
+Após o filtro de consistência, o alvo é calculável para **424 das 444 licitações (95,5 %)** — restam apenas 20 licitações sem `soma_valorPagoEmpenho`, que são excluídas automaticamente pelo `dropna` no cálculo das correlações.
+
+O filtro aplicado em `concatenacaoDados.py` elimina o viés de seleção presente em versões anteriores (que usavam a base completa de 5.990 licitações, com apenas 7 % do alvo calculável).
 
 ### Resultado das correlações (25 variáveis)
 
-18 das 25 variáveis candidatas atingem o critério |Spearman| ≥ 0,3:
+**18 das 25** variáveis candidatas atingem o critério |Spearman| ≥ 0,3 (critério ≥ 15 **atendido**):
 
-| # | Variável | Spearman | Interpretação |
+| # | Variável | Spearman | Pearson | Interpretação |
+|---|---|---|---|---|
+| 01 | `soma_valorPagoEmpenho` | +0,55 | +0,02 | Total pago (componente do numerador) |
+| 02 | `soma_valorLiquidadoEmpenho` | +0,53 | +0,02 | Total liquidado (estágio anterior ao pagamento) |
+| 03 | `valor_por_item` | −0,49 | −0,00 | Contratos de alto valor unitário têm execução mais lenta |
+| 04 | `log_valor_por_item` | −0,49 | +0,04 | idem (escala log) |
+| 05 | `valorHomologado` | −0,44 | −0,01 | Contratos maiores têm menor taxa de execução |
+| 06 | `log_valorHomologado` | −0,44 | −0,24 | idem (escala log) |
+| 07 | `valorEstimado` | −0,44 | −0,00 | Correlacionado com `valorHomologado` |
+| 08 | `log_valorEstimado` | −0,44 | +0,03 | idem (escala log) |
+| 09 | `log_economia_absoluta` | −0,37 | +0,08 | Maior economia gerada → menor execução proporcional |
+| 10 | `orgao_principal_cod` | −0,35 | +0,06 | Secretaria responsável afeta o ritmo de execução |
+| 11 | `amplitude_desconto_item` | +0,34 | −0,04 | Maior heterogeneidade de preços → melhor execução |
+| 12 | `n_vencedores` | +0,34 | −0,02 | Mais fornecedores distintos → execução mais fragmentada/completa |
+| 13 | `log_n_vencedores` | +0,34 | −0,02 | idem (escala log) |
+| 14 | `qtd_itens` | +0,34 | −0,02 | Processos com mais itens executam mais |
+| 15 | `log_qtd_itens` | +0,34 | −0,03 | idem (escala log) |
+| 16 | `economia_absoluta` | −0,32 | +0,02 | Maior economia → menor execução relativa |
+| 17 | `soma_ref` | +0,31 | −0,00 | Soma dos preços de referência dos itens |
+| 18 | `soma_venc` | +0,31 | −0,00 | Soma dos preços vencedores dos itens |
+
+As **7 variáveis restantes** ficaram abaixo de 0,3, mas são teoricamente relevantes para a pergunta-problema:
+
+| # | Variável | Spearman | Grupo |
 |---|---|---|---|
-| 01 | `soma_valorPagoEmpenho` | +0,55 | Total pago (componente do numerador) |
-| 02 | `soma_valorLiquidadoEmpenho` | +0,53 | Total liquidado (estágio anterior ao pagamento) |
-| 03 | `valor_por_item` | −0,49 | Contratos de alto valor unitário têm execução mais lenta |
-| 04 | `log_valor_por_item` | −0,49 | idem (escala log) |
-| 05 | `valorHomologado` | −0,44 | Contratos maiores têm menor taxa de execução |
-| 06 | `log_valorHomologado` | −0,44 | idem (escala log) |
-| 07 | `valorEstimado` | −0,44 | Correlacionado com valorHomologado |
-| 08 | `log_valorEstimado` | −0,44 | idem (escala log) |
-| 09 | `log_economia_absoluta` | −0,37 | Maior economia gerada → menor execução proporcional |
-| 10 | `orgao_principal_cod` | −0,35 | Secretaria responsável afeta o ritmo de execução |
-| 11 | `amplitude_desconto_item` | +0,34 | Maior heterogeneidade de preços → melhor execução |
-| 12 | `n_vencedores` | +0,34 | Mais fornecedores distintos → execução mais fragmentada/completa |
-| 13 | `log_n_vencedores` | +0,34 | idem (escala log) |
-| 14 | `qtd_itens` | +0,34 | Processos com mais itens executam mais |
-| 15 | `log_qtd_itens` | +0,34 | idem (escala log) |
-| 16 | `economia_absoluta` | −0,32 | Maior economia → menor execução relativa |
-| 17 | `soma_ref` | +0,31 | Soma dos preços de referência dos itens |
-| 18 | `soma_venc` | +0,31 | Soma dos preços vencedores dos itens |
+| 19 | `qtd_participantes` | +0,28 | Competição |
+| 20 | `log_qtd_participantes` | +0,28 | Competição |
+| 21 | `houve_disputa` | +0,22 | Competição |
+| 22 | `funcao_principal_cod` | −0,13 | Tipo de gasto |
+| 23 | `tipoObjeto_cod` | −0,02 | Tipo de gasto |
+| 24 | `media_variacao_contr` | +0,01 | Aditivos contratuais |
+| 25 | `modalidade_cod` | −0,01 | Tipo de gasto |
 
-As 7 variáveis restantes (competição e tipo de gasto) ficaram abaixo de 0,3, mas são teoricamente relevantes para a pergunta-problema.
+### Nota de transparência
+
+Parte das variáveis no topo do ranking — `soma_valorPagoEmpenho` (numerador do alvo), `valorHomologado` (denominador), `valorEstimado` (≈ denominador), `economia_absoluta` (= `valorEstimado − valorHomologado`), `soma_ref`, `soma_venc`, `valor_por_item` e suas transformações logarítmicas — são componentes matemáticos do alvo. As correlações fortes observadas nelas refletem parcialmente essa relação por construção, não apenas o fenômeno estudado. Mantidas na lista por coerência com o critério de **25 candidatas** da disciplina; em uma análise puramente explicativa, seriam tratadas como controles ou excluídas.
+
+### Observações sobre a distribuição do alvo
+
+- `razao_pago_homolog`: média ≈ 25,5 %, **mediana ≈ 0,5 %**, desvio-padrão ≈ 490 %.
+- Cauda muito pesada (outliers com razão ≫ 1, p. ex. aditivos empenhados sobre contratos homologados em valores baixos).
+- **Pearson ≈ 0 em quase todas as variáveis** — confirma que as relações são monotônicas mas não lineares. A interpretação deve ser feita sobre **Spearman** (robusto a outliers).
+- Considerar *winsorização* (ex.: clamp de `razao_pago_homolog` em [0, 2]) ou filtro explícito de outliers para trabalhos futuros.
 
 ## Decisões metodológicas relevantes
 
@@ -233,9 +269,9 @@ As 7 variáveis restantes (competição e tipo de gasto) ficaram abaixo de 0,3, 
 
 ```
 pandas
-scipy      # instalado como dependência do pandas ou separadamente
+scipy
 numpy      # instalado como dependência do pandas
-matplotlib # para geração do gráfico
+matplotlib
 ```
 
 Instalar com:

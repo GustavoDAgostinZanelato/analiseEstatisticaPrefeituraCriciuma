@@ -7,6 +7,7 @@ include/
 lib/
 share/
 pyvenv.cfg
+.claude/
 
 # Cache do Python
 __pycache__/

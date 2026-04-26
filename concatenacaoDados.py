@@ -1,1090 +1,819 @@
 """
 =============================================================================
-UNIFICACAO DE BASES - PORTAL DA TRANSPARENCIA CRICIUMA (v10)
+UNIFICACAO DE BASES - PORTAL DA TRANSPARENCIA CRICIUMA (v14)
 =============================================================================
-Pergunta problema:
-  "Qual o impacto da competicao (numero de participantes) e do tipo de gasto
-   (Secretaria/Programa) na economia gerada e na eficiencia da execucao
-   financeira do municipio de Criciuma?"
+Pergunta-problema:
+  "O numero de participantes nos processos de aquisicao publica influencia a
+   economia gerada pela Prefeitura de Criciuma? O tipo de processo (licitacao
+   competitiva ou dispensa) e a secretaria responsavel modulam esse efeito?
+   Processos com maior nivel de competicao estao associados a fornecedores
+   com melhor historico contratual?"
 
-=============================================================================
-CORRECOES v8 (sobre v7)
-=============================================================================
+Fontes:
+  - Processos Licitatorios Finalizados-2019
+  - Processos Licitatorios Finalizados-2020
+  - Dispensa de Licitacao-2019
+  - Dispensa de Licitacao-2020
+  - Fornecedores sancionados (referencia cruzada)
 
-  [FIX #4 - CONTRATOS COM anoLicitacao EM BRANCO]
-    Causa: 37 contratos na Relacao de Contratos tinham anoLicitacao = " ",
-    gerando chave "10_" em vez de "10_2019" -> join com df_processos falhava.
-    Solucao: preencher anoLicitacao em branco com a coluna 'ano' (sempre
-    preenchida nesse arquivo).
+Correcoes aplicadas (sobre v13):
+  [FIX-01] Participantes: join direto via UUID
+           df_27['participantes'] -> df_participantes['origem_arquivo']
+           Motivo: o mapeamento anterior (CNPJ->contrato) contava apenas
+           vencedores, ignorando todos os participantes que perderam.
 
-  [FIX #5 - DESPESAS 100% NULOS (licitacao e credor como nomes de arquivo)]
-    Causa: as colunas 'licitacao' e 'credor' em df_27 de despesas contem
-    nomes de arquivo CSV (ex: licitacao_cf3d7cf0.csv), nao dados diretos.
-    A funcao extrair_numero_licitacao extraia digitos do UUID como numero.
-    Solucao: fazer JOIN com df_licitacao_unificado.csv e df_credor_unificado.csv
-    (ja gerados pelo script.py) usando o nome do arquivo como chave.
+  [FIX-02] valorHomologado reconstruido via sum(valorTotalVencedor) por licitacao
+           quando o campo esta nulo no df_27.
+           Validacao: concordancia de 99,8% em 480 licitacoes de 2019.
+           Motivo: 70% das licitacoes de 2020 nao tinham valorHomologado,
+           bloqueando ~7.600 itens validos.
 
-  [FIX #6 - DUPLICATAS DE Processos Licitatorios x Processos Finalizados]
-    Causa: os dois datasets do portal sao o mesmo conjunto de dados; a coluna
-    'origem_arquivo' diferia entre eles, impedindo o drop_duplicates.
-    Solucao: excluir 'origem_arquivo' da chave de deduplicacao na base final.
+  [FIX-03] valorEstimado removido do filtro obrigatorio de consistencia.
+           Motivo: licitacoes com valorHomologado reconstruido pelos itens
+           podem nao ter valorEstimado sem comprometer o calculo do alvo.
 
-  [FIX #7 - SUPORTE A MULTIPLOS ANOS]
-    Para adicionar um novo ano: rode script.py em cada pasta do novo ano,
-    depois adicione uma entrada em CONFIGURACAO_ANOS abaixo.
+  [FIX-04] Secretaria vinculada via UUID direto
+           df_27['despesas'] -> df_despesas['origem_arquivo']
+           Motivo: o mapeamento anterior (empenhos -> numero licitacao) tinha
+           cobertura de apenas 33%.
 
-=============================================================================
-NOVIDADES v9/v10 - 6 VARIAVEIS CANDIDATAS ADICIONADAS
-=============================================================================
-
-  Variaveis derivadas de fontes ja existentes, incorporadas diretamente
-  ao pipeline para enriquecer as correlacoes em calcularCorrelacoes.py:
-
-  [VAR #1 - dias_tramitacao]
-    Dias entre dataPublicacao e dataHomologacao da licitacao.
-    Hipotese: processos com menor competicao tramitam mais rapido.
-
-  [VAR #2 - log_dias_tramitacao]
-    log(dias_tramitacao + 1). Reduz assimetria positiva de dias_tramitacao.
-
-  [VAR #3 - media_variacao_contr]
-    (media_valorFinal - media_valorInicial) / media_valorInicial * 100.
-    Percentual medio de variacao (aditivos) dos contratos da licitacao.
-
-  [VAR #4 - interact_part_logval]
-    qtd_participantes * log(valorEstimado + 1).
-    Captura se o efeito da competicao e maior em contratos de alto valor.
-
-  [VAR #5 - formaJulgamento_cod]
-    Codificacao categorica de formaJulgamento (menor preco, melhor tecnica,
-    tecnica e preco, etc). Diferente de modalidade e tipo de objeto.
-
-  [VAR #6 - amplitude_desconto_item / media_desconto_item]
-    Amplitude = max(economia_item_pct) - min(economia_item_pct) por licitacao.
-    Media = media dos descontos por item. Ambas indicam heterogeneidade dos
-    precos ofertados pelos vencedores.
-
-=============================================================================
-CONFIGURE AQUI ANTES DE RODAR
+Unidade de analise: 1 linha = 1 item vencedor de licitacao.
 =============================================================================
 """
 
 import os
-
-# Diretorio raiz dos dados ja unificados pelo script.py
-# Caminho relativo ao arquivo deste script (portavel entre maquinas).
-BASE_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "dadosUnificados",
-)
-
-# =============================================================================
-# CONFIGURACAO DE ANOS
-# Cada entrada representa um ano baixado do portal da transparencia.
-# Para adicionar um novo ano:
-#   1. Baixe as pastas do portal para C:\Users\gusta\Desktop\Projeto Extensao Estatistica
-#   2. Ajuste o caminho em script.py e rode-o para cada pasta do novo ano
-#   3. Adicione uma nova entrada aqui com os caminhos gerados pelo script.py
-# =============================================================================
-CONFIGURACAO_ANOS = [
-    {
-        "ano": "2019",
-        "processos_licitatorios": os.path.join(BASE_DIR, "Processos Licitatórios-2019"),
-        "processos_finalizados":  os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2019"),
-        "dispensa":               os.path.join(BASE_DIR, "Dispensa de Licitação-2019"),
-        "inexigibilidade":        os.path.join(BASE_DIR, "Inexigibilidade de Licitação-2019"),
-        "contratos":              os.path.join(BASE_DIR, "Relação de Contratos-2019"),
-        "despesas":               os.path.join(BASE_DIR, "Execução Detalhada de Despesas-2019"),
-    },
-    # Descomente e ajuste para adicionar outro ano apos rodar script.py:
-    {
-        "ano": "2020",
-        "processos_licitatorios": os.path.join(BASE_DIR, "Processos Licitatórios-2020"),
-        "processos_finalizados":  os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2020"),
-        "dispensa":               os.path.join(BASE_DIR, "Dispensa de Licitação-2020"),
-        "inexigibilidade":        os.path.join(BASE_DIR, "Inexigibilidade de Licitação-2020"),
-        "contratos":              os.path.join(BASE_DIR, "Relação de Contratos-2020"),
-        "despesas":               os.path.join(BASE_DIR, "Execução Detalhada de Despesas-2020"),
-    },
-]
-
-PASTA_SANCIONADOS = os.path.join(BASE_DIR, "Fornecedores sancionados")
-ARQUIVO_SAIDA     = "baseFinalUnificada/base_unificada_criciuma_v13.csv"
-ENCODING          = "utf-8"
-
-# Derivar variaveis de compatibilidade para o restante do codigo
-_cfg_principal  = CONFIGURACAO_ANOS[0]
-PASTA_PROCESSOS_LICITATORIOS = _cfg_principal["processos_licitatorios"]
-PASTA_PROCESSOS_FINALIZADOS  = _cfg_principal["processos_finalizados"]
-PASTA_DISPENSA               = _cfg_principal["dispensa"]
-PASTA_INEXIGIBILIDADE        = _cfg_principal["inexigibilidade"]
-PASTA_CONTRATOS              = _cfg_principal["contratos"]
-PASTA_DESPESAS               = _cfg_principal["despesas"]
-
-# Listas de todas as fontes de contratos e despesas (multi-ano)
-FONTES_CONTRATOS_LISTA = [
-    (f"contrato_{cfg['ano']}", cfg["contratos"])
-    for cfg in CONFIGURACAO_ANOS
-    if cfg.get("contratos") and os.path.isdir(cfg["contratos"])
-]
-FONTES_DESPESAS_LISTA = [
-    (f"despesas_{cfg['ano']}", cfg["despesas"])
-    for cfg in CONFIGURACAO_ANOS
-    if cfg.get("despesas") and os.path.isdir(cfg["despesas"])
-]
-
-# =============================================================================
-import glob, warnings, re
+import warnings
 import pandas as pd
 import numpy as np
 
 warnings.filterwarnings("ignore")
 
+# =============================================================================
+# CONFIGURACAO
+# =============================================================================
 
-# -----------------------------------------------------------------------------
+BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dadosUnificados")
+
+FONTES = [
+    {
+        "label": "finalizado_2019",
+        "tipo_processo": "LICITACAO",
+        "pasta": os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2019"),
+    },
+    {
+        "label": "finalizado_2020",
+        "tipo_processo": "LICITACAO",
+        "pasta": os.path.join(BASE_DIR, "Processos Licitatórios Finalizados-2020"),
+    },
+    {
+        "label": "dispensa_2019",
+        "tipo_processo": "DISPENSA",
+        "pasta": os.path.join(BASE_DIR, "Dispensa de Licitação-2019"),
+    },
+    {
+        "label": "dispensa_2020",
+        "tipo_processo": "DISPENSA",
+        "pasta": os.path.join(BASE_DIR, "Dispensa de Licitação-2020"),
+    },
+]
+
+PASTA_SANCIONADOS = os.path.join(BASE_DIR, "Fornecedores sancionados")
+ARQUIVO_SAIDA     = "baseFinalUnificada/base_unificada_criciuma_v14.csv"
+
+
+# =============================================================================
 # FUNCOES AUXILIARES
-# -----------------------------------------------------------------------------
+# =============================================================================
 
-def limpar_chave(txt):
-    if pd.isna(txt):
-        return ""
-    return str(txt).split('.')[0].strip()
-
-
-def detectar_separador(filepath, encoding="utf-8"):
-    for enc in [encoding, "utf-8-sig", "latin-1", "cp1252"]:
-        try:
-            with open(filepath, "r", encoding=enc) as f:
-                linha1 = f.readline()
-                linha2 = f.readline()
-            candidatos = {";": linha1.count(";"), ",": linha1.count(","), "\t": linha1.count("\t")}
-            melhor_sep, melhor_score = ";", -1
-            for sep, cnt in candidatos.items():
-                if cnt == 0:
-                    continue
-                c1 = len(linha1.split(sep))
-                c2 = len(linha2.split(sep)) if linha2.strip() else c1
-                score = cnt * (1 if abs(c1 - c2) <= 2 else 0)
-                if score > melhor_score:
-                    melhor_score, melhor_sep = score, sep
-            return melhor_sep, enc
-        except (UnicodeDecodeError, PermissionError):
-            continue
-    return ";", "latin-1"
-
-
-def encontrar_csvs(pasta_raiz, nome_arquivo):
-    padrao = os.path.join(pasta_raiz, "**", f"*{nome_arquivo}*.csv")
-    arquivos = glob.glob(padrao, recursive=True)
-    if not arquivos:
-        padrao2 = os.path.join(pasta_raiz, "**", f"*{nome_arquivo}*")
-        arquivos = [f for f in glob.glob(padrao2, recursive=True)
-                    if os.path.isfile(f) and not f.endswith(".xlsx")]
-    return sorted(arquivos)
-
-
-def ler_csvs(pasta_raiz, nome_arquivo, label=""):
-    arquivos = encontrar_csvs(pasta_raiz, nome_arquivo)
-    if not arquivos:
-        print(f"  [AVISO] '{nome_arquivo}' nao encontrado em: {pasta_raiz}")
+def ler_csv(pasta, nome_arquivo, label=""):
+    """Le um CSV da pasta com deteccao automatica de encoding/separador."""
+    path = os.path.join(pasta, nome_arquivo)
+    if not os.path.exists(path):
+        print(f"  [AVISO] Nao encontrado: {nome_arquivo} em {os.path.basename(pasta)}")
         return pd.DataFrame()
-    frames, seps = [], set()
-    for arq in arquivos:
-        sep, enc = detectar_separador(arq, encoding=ENCODING)
-        seps.add(sep)
-        try:
-            df = pd.read_csv(arq, sep=sep, encoding=enc,
-                             low_memory=False, on_bad_lines="skip", dtype=str)
-            df["_fonte"]          = label
-            df["_arquivo_origem"] = os.path.basename(arq)
-            frames.append(df)
-        except Exception as e:
-            print(f"  [ERRO] {os.path.basename(arq)}: {e}")
-    if not frames:
+    try:
+        df = pd.read_csv(
+            path, sep=None, engine="python",
+            on_bad_lines="skip", dtype=str, encoding="utf-8-sig",
+        )
+        df.columns = [c.lstrip("﻿").strip() for c in df.columns]
+        print(f"  OK {nome_arquivo} ({label}): {len(df):,} linhas")
+        return df
+    except Exception as exc:
+        print(f"  [ERRO] {nome_arquivo}: {exc}")
         return pd.DataFrame()
-    resultado = pd.concat(frames, ignore_index=True)
-    seps_str = ", ".join(f"'{s}'" for s in seps)
-    print(f"  OK '{nome_arquivo}' ({label}): {len(resultado):,} linhas | "
-          f"{resultado.shape[1]} colunas | sep: {seps_str}")
-    return resultado
 
 
-def normalizar_moeda(serie):
-    """Converte string para float, tentando EN e depois BR."""
-    s = serie.astype(str).str.strip().replace({"nan": None, "None": None, "": None})
+def para_float(serie):
+    """Converte coluna string para float, suportando formatos BR e EN."""
+    s = serie.astype(str).str.strip()
     resultado = pd.to_numeric(s, errors="coerce")
-    if len(resultado) > 0 and resultado.notna().mean() >= 0.5:
+    if resultado.notna().mean() >= 0.5:
         return resultado
-    print("  [INFO] Usando fallback BR (virgula decimal)...")
+    # Fallback: formato BR (ponto como milhar, virgula como decimal)
     s_br = (s
-            .str.replace(r"\s", "", regex=True)
-            .str.replace(r"[^\d,\.\-]", "", regex=True)
-            .str.replace(r"\.(?=\d{3}[,\.])", "", regex=True)
+            .str.replace(r"\.", "", regex=True)
             .str.replace(",", ".", regex=False))
     return pd.to_numeric(s_br, errors="coerce")
 
 
-def preparar_chave(df, cols_candidatas):
-    """Cria coluna 'chave_licitacao' = numero + '_' + ano."""
-    for col_num, col_ano in cols_candidatas:
-        if col_num in df.columns and col_ano in df.columns:
-            df[col_num] = df[col_num].apply(limpar_chave)
-            df[col_ano] = df[col_ano].apply(limpar_chave)
-            df["chave_licitacao"] = df[col_num] + "_" + df[col_ano]
-            return df, True
-    return df, False
+def codificar(serie):
+    """Codifica serie categorica como float (-1 substituido por NaN)."""
+    cats = pd.Categorical(serie.fillna("__nulo__"))
+    codes = cats.codes.astype(float)
+    codes[serie.isna()] = np.nan
+    return codes
 
 
-def diagnostico_merge(nome, chaves_esq, chaves_dir):
-    intersecao = chaves_esq & chaves_dir
-    pct = len(intersecao) / max(len(chaves_esq), 1) * 100
-    print(f"  Diagnostico '{nome}':")
-    print(f"    Esq: {len(chaves_esq):,}  Dir: {len(chaves_dir):,}  "
-          f"Casam: {len(intersecao):,} ({pct:.1f}%)")
-    if len(intersecao) == 0:
-        print(f"    [ERRO CRITICO] Nenhuma chave casou!")
-        print(f"    Exemplos esq: {list(chaves_esq)[:5]}")
-        print(f"    Exemplos dir: {list(chaves_dir)[:5]}")
+def moda_serie(x):
+    """Retorna a moda de uma serie ignorando nulos; None se vazia."""
+    vals = x.dropna()
+    if vals.empty:
+        return None
+    return vals.mode().iloc[0]
 
 
-def extrair_numero_licitacao(col_licitacao):
-    """
-    FIX #1 - Extrai numeroLicitacao da coluna 'licitacao' de df_despesas.
+# =============================================================================
+# ETAPA 1 — PROCESSAR CADA FONTE
+# =============================================================================
 
-    O campo pode conter o numero puro ('72'), um objeto JSON
-    ('{"numeroLicitacao":"72","dataLicitacao":"..."}') ou estar vazio.
-    Tenta as seguintes estrategias em ordem:
-      1. JSON: procura 'numeroLicitacao' com regex
-      2. Numero puro: converte diretamente
-    """
-    def _extrair_um(val):
-        if pd.isna(val) or str(val).strip() in ("", "nan", "None"):
-            return None
-        s = str(val).strip()
-        # Tentativa 1: campo JSON com chave numeroLicitacao
-        m = re.search(r'"numeroLicitacao"\s*:\s*"?(\d+)"?', s)
-        if m:
-            return m.group(1)
-        # Tentativa 2: campo JSON com chave numero
-        m = re.search(r'"numero"\s*:\s*"?(\d+)"?', s)
-        if m:
-            return m.group(1)
-        # Tentativa 3: numero puro
-        s_num = re.sub(r"[^\d]", "", s)
-        return s_num if s_num else None
+print("\n" + "=" * 60)
+print("ETAPA 1 — CARREGAMENTO E PROCESSAMENTO DAS FONTES")
+print("=" * 60)
 
-    return col_licitacao.apply(_extrair_um)
+frames_itens = []
 
+for fonte in FONTES:
+    label        = fonte["label"]
+    tipo_proc    = fonte["tipo_processo"]
+    pasta        = fonte["pasta"]
 
-# -----------------------------------------------------------------------------
-# ETAPA 1 - LEITURA DAS BASES DE PROCESSOS
-# -----------------------------------------------------------------------------
+    if not os.path.isdir(pasta):
+        print(f"\n[AVISO] Pasta nao encontrada: {pasta}")
+        continue
 
-print("\n" + "="*60)
-print("ETAPA 1 - LEITURA DAS BASES DE PROCESSOS")
-print("="*60)
+    print(f"\n--- {label} ({tipo_proc}) ---")
 
-# Construir lista de fontes para todos os anos configurados
-FONTES_PROCESSOS = []
-for _cfg in CONFIGURACAO_ANOS:
-    _ano = _cfg["ano"]
-    for _key, _label in [
-        ("processos_licitatorios", f"licit_{_ano}"),
-        ("processos_finalizados",  f"finalizado_{_ano}"),
-        ("dispensa",               f"dispensa_{_ano}"),
-        ("inexigibilidade",        f"inexigib_{_ano}"),
+    # -------------------------------------------------------------------------
+    # 1A. Carregar arquivos da pasta
+    # -------------------------------------------------------------------------
+    df27 = ler_csv(pasta, "df_27_unificado.csv",              label)
+    dfp  = ler_csv(pasta, "df_participantes_unificado.csv",   label)
+    dfiv = ler_csv(pasta, "df_itensvencedores_unificado.csv", label)
+    dfd  = ler_csv(pasta, "df_despesas_unificado.csv",        label)
+
+    if df27.empty or dfiv.empty:
+        print(f"  [AVISO] Arquivos principais ausentes em {label}. Pulando.")
+        continue
+
+    # -------------------------------------------------------------------------
+    # 1B. Converter valores monetarios de df_27
+    # -------------------------------------------------------------------------
+    for col in ["valorEstimado", "valorHomologado"]:
+        if col in df27.columns:
+            df27[col] = para_float(df27[col])
+
+    # -------------------------------------------------------------------------
+    # 1C. Chave de licitacao: prefere numeroLicitacao/anoLicitacao
+    # -------------------------------------------------------------------------
+    chave_criada = False
+    for col_num, col_ano in [
+        ("numeroLicitacao", "anoLicitacao"),
+        ("numeroProcesso",  "anoProcesso"),
     ]:
-        if _cfg.get(_key) and os.path.isdir(_cfg[_key]):
-            FONTES_PROCESSOS.append((_label, _cfg[_key]))
+        if col_num in df27.columns and col_ano in df27.columns:
+            num = df27[col_num].astype(str).str.strip().str.split(".").str[0]
+            ano = df27[col_ano].astype(str).str.strip().str.split(".").str[0]
+            df27["chave_licitacao"] = num + "_" + ano
+            chave_criada = True
+            break
 
-frames_proc = []
-frames_part = []
-frames_venc = []
+    if not chave_criada:
+        df27["chave_licitacao"] = pd.RangeIndex(len(df27)).astype(str) + "_" + label
 
-for label, pasta in FONTES_PROCESSOS:
-    if not pasta or not os.path.isdir(pasta):
-        print(f"  [AVISO] Pasta nao encontrada: {pasta}")
-        continue
-    df27 = ler_csvs(pasta, "df_27_unificado",             label)
-    if not df27.empty:  frames_proc.append(df27)
-    dfp  = ler_csvs(pasta, "df_participantes_unificado",  label)
-    if not dfp.empty:   frames_part.append(dfp)
-    dfv  = ler_csvs(pasta, "df_itensvencedores_unificado",label)
-    if not dfv.empty:   frames_venc.append(dfv)
+    # -------------------------------------------------------------------------
+    # 1D. [FIX-01] Contar participantes via UUID direto
+    # -------------------------------------------------------------------------
+    df27["qtd_participantes"] = 0
 
-df_processos = pd.concat(frames_proc, ignore_index=True) if frames_proc else pd.DataFrame()
-df_part      = pd.concat(frames_part, ignore_index=True) if frames_part else pd.DataFrame()
-df_venc      = pd.concat(frames_venc, ignore_index=True) if frames_venc else pd.DataFrame()
-
-print(f"\n  -> df_processos bruto : {len(df_processos):,} linhas")
-print(f"  -> df_participantes   : {len(df_part):,} linhas")
-print(f"  -> df_itensvencedores : {len(df_venc):,} linhas")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 2 - PREPARACAO DO df_processos
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 2 - PREPARACAO DO df_processos")
-print("="*60)
-
-if df_processos.empty:
-    raise RuntimeError("df_processos esta vazio. Verifique os caminhos.")
-
-for col in ["valorEstimado", "valorHomologado"]:
-    if col in df_processos.columns:
-        df_processos[col] = normalizar_moeda(df_processos[col])
-
-df_processos, ok = preparar_chave(
-    df_processos,
-    [("numeroLicitacao", "anoLicitacao"), ("numeroProcesso", "anoProcesso")]
-)
-if not ok:
-    raise RuntimeError(f"Chave nao criada em df_processos. Colunas: {df_processos.columns.tolist()}")
-
-# Preencher modalidade para Dispensa/Inexigibilidade
-if "modalidade" not in df_processos.columns:
-    df_processos["modalidade"] = None
-df_processos["modalidade"] = df_processos["modalidade"].fillna(df_processos["_fonte"])
-
-antes = len(df_processos)
-df_processos = df_processos.drop_duplicates(subset="chave_licitacao", keep="last")
-print(f"  Duplicatas removidas: {antes - len(df_processos):,} | Restaram: {len(df_processos):,}")
-
-df_processos["economia_absoluta"] = (df_processos["valorEstimado"]
-                                     - df_processos["valorHomologado"])
-df_processos["economia_pct"] = np.where(
-    df_processos["valorEstimado"] > 0,
-    (df_processos["economia_absoluta"] / df_processos["valorEstimado"]) * 100,
-    np.nan
-)
-print(f"  Chaves unicas: {df_processos['chave_licitacao'].nunique():,}")
-
-# VAR #1 e #2: dias_tramitacao e log_dias_tramitacao
-# dataPublicacao e dataHomologacao existem no df_27 de todas as pastas de processos.
-for _col_dt in ["dataPublicacao", "dataHomologacao"]:
-    if _col_dt in df_processos.columns:
-        df_processos[_col_dt] = pd.to_datetime(
-            df_processos[_col_dt], errors="coerce", utc=True
+    if not dfp.empty and "origem_arquivo" in dfp.columns and "participantes" in df27.columns:
+        contagem = (dfp.groupby("origem_arquivo")
+                    .size()
+                    .reset_index(name="qtd_participantes"))
+        df27 = df27.merge(
+            contagem.rename(columns={"origem_arquivo": "participantes"}),
+            on="participantes", how="left",
         )
-        df_processos[_col_dt] = df_processos[_col_dt].dt.tz_convert(None)
+        # Resolver conflito de coluna se merge criou _x/_y
+        if "qtd_participantes_y" in df27.columns:
+            df27["qtd_participantes"] = df27["qtd_participantes_y"].fillna(0)
+            df27 = df27.drop(columns=["qtd_participantes_x", "qtd_participantes_y"])
+        else:
+            df27["qtd_participantes"] = df27["qtd_participantes"].fillna(0)
 
-if {"dataPublicacao", "dataHomologacao"}.issubset(df_processos.columns):
-    df_processos["dias_tramitacao"] = (
-        df_processos["dataHomologacao"] - df_processos["dataPublicacao"]
-    ).dt.days.clip(lower=0)
-    df_processos["log_dias_tramitacao"] = np.log1p(df_processos["dias_tramitacao"])
-    _validos_dt = df_processos["dias_tramitacao"].notna().sum()
-    print(f"  dias_tramitacao calculados: {_validos_dt:,} de {len(df_processos):,}")
-else:
-    print("  [AVISO] dataPublicacao ou dataHomologacao ausentes - dias_tramitacao ignorado.")
+    df27["qtd_participantes"] = df27["qtd_participantes"].astype(int)
+    cob_part = (df27["qtd_participantes"] > 0).sum()
+    print(f"  [FIX-01] Participantes: total={df27['qtd_participantes'].sum():.0f} | "
+          f"{cob_part}/{len(df27)} licitacoes com dados")
 
+    # -------------------------------------------------------------------------
+    # 1E. [FIX-04] Secretaria via UUID direto
+    # -------------------------------------------------------------------------
+    if not dfd.empty and "origem_arquivo" in dfd.columns and "despesas" in df27.columns:
+        for col_orig, col_dest in [
+            ("orgao",    "orgao_principal"),
+            ("funcao",   "funcao_principal"),
+            ("programa", "programa_principal"),
+        ]:
+            if col_orig not in dfd.columns:
+                df27[col_dest] = None
+                continue
+            agg = (dfd.groupby("origem_arquivo")[col_orig]
+                   .agg(moda_serie)
+                   .reset_index()
+                   .rename(columns={"origem_arquivo": "despesas", col_orig: col_dest}))
+            # Remove coluna preexistente para evitar sufixo _x/_y no merge
+            df27 = df27.drop(columns=[col_dest], errors="ignore")
+            df27 = df27.merge(agg, on="despesas", how="left")
 
-# -----------------------------------------------------------------------------
-# ETAPA 3 - PREPARACAO DO df_contratos
-#
-# FIX #3: calcular dias_vigencia ANTES de concatenar os contratos extras,
-# pois apenas o df_27 da Relacao de Contratos tem dataVigenciaInicial/Final.
-# -----------------------------------------------------------------------------
+        cob_org = df27["orgao_principal"].notna().sum() if "orgao_principal" in df27.columns else 0
+        print(f"  [FIX-04] Secretaria: {cob_org}/{len(df27)} licitacoes com orgao")
+    else:
+        for col in ["orgao_principal", "funcao_principal", "programa_principal"]:
+            df27[col] = None
+        print("  [FIX-04] Secretaria: df_despesas ausente ou sem coluna despesas")
 
-print("\n" + "="*60)
-print("ETAPA 3 - PREPARACAO DO df_contratos")
-print("="*60)
+    # -------------------------------------------------------------------------
+    # 1F. Dias de tramitacao
+    # -------------------------------------------------------------------------
+    for col in ["dataPublicacao", "dataHomologacao"]:
+        if col in df27.columns:
+            df27[col] = pd.to_datetime(df27[col], errors="coerce")
 
-# 3A: Relacao de Contratos de todos os anos (tem dataVigenciaInicial/Final e valorInicial/Final)
-_frames_contr_principal = []
-for _label_c, _pasta_c in FONTES_CONTRATOS_LISTA:
-    _dfc = ler_csvs(_pasta_c, "df_27_unificado", _label_c)
-    if not _dfc.empty:
-        _frames_contr_principal.append(_dfc)
-df_contratos_principal = (pd.concat(_frames_contr_principal, ignore_index=True)
-                          if _frames_contr_principal else pd.DataFrame())
-
-if not df_contratos_principal.empty:
-    for col in ["valorInicial", "valorFinal", "valorAlterado"]:
-        if col in df_contratos_principal.columns:
-            df_contratos_principal[col] = normalizar_moeda(df_contratos_principal[col])
-
-    # FIX #3: calcular dias_vigencia aqui, antes do concat
-    for col in ["dataVigenciaInicial", "dataVigenciaFinal"]:
-        if col in df_contratos_principal.columns:
-            df_contratos_principal[col] = pd.to_datetime(
-                df_contratos_principal[col], errors="coerce", dayfirst=True
-            )
-    if {"dataVigenciaInicial", "dataVigenciaFinal"}.issubset(df_contratos_principal.columns):
-        df_contratos_principal["dias_vigencia"] = (
-            df_contratos_principal["dataVigenciaFinal"]
-            - df_contratos_principal["dataVigenciaInicial"]
-        ).dt.days
-        validos = df_contratos_principal["dias_vigencia"].notna().sum()
-        print(f"  dias_vigencia calculados: {validos:,} de {len(df_contratos_principal):,}")
-
-    # FIX #4: preencher anoLicitacao/anoProcessoCompra em branco com coluna 'ano'
-    # (Relacao de Contratos tem 'ano' sempre preenchido, mas 'anoLicitacao' pode ser ' ')
-    for col_ano in ["anoLicitacao", "anoProcessoCompra"]:
-        if col_ano in df_contratos_principal.columns and "ano" in df_contratos_principal.columns:
-            mask_blank = df_contratos_principal[col_ano].str.strip().eq("")
-            df_contratos_principal.loc[mask_blank, col_ano] = (
-                df_contratos_principal.loc[mask_blank, "ano"]
-            )
-            fixados = mask_blank.sum()
-            if fixados > 0:
-                print(f"  {col_ano}: {fixados:,} brancos preenchidos com coluna 'ano'")
-
-    df_contratos_principal, ok = preparar_chave(
-        df_contratos_principal,
-        [("numeroLicitacao", "anoLicitacao"), ("numeroProcessoCompra", "anoProcessoCompra")]
-    )
-    if ok and "cnpjCpfContratado" in df_contratos_principal.columns:
-        df_contratos_principal["cnpjCpfContratado"] = (
-            df_contratos_principal["cnpjCpfContratado"].apply(limpar_chave)
-        )
-
-# 3B: df_contratos_unificado das pastas de processos (tem 'valor' mas NAO tem dias_vigencia)
-frames_contr_extra = []
-for label, pasta in FONTES_PROCESSOS:
-    if pasta and os.path.isdir(pasta):
-        dfc = ler_csvs(pasta, "df_contratos_unificado", label + "_contr")
-        if not dfc.empty:
-            # Normalizar coluna 'valor' -> mapear para valorInicial/valorFinal
-            if "valor" in dfc.columns:
-                dfc["valor"] = normalizar_moeda(dfc["valor"])
-                if "valorInicial" not in dfc.columns:
-                    dfc["valorInicial"] = dfc["valor"]
-                if "valorFinal" not in dfc.columns:
-                    dfc["valorFinal"] = dfc["valor"]
-            # Esses contratos nao tem dataVigencia -> dias_vigencia sera NaN (correto)
-            dfc["dias_vigencia"] = np.nan
-            frames_contr_extra.append(dfc)
-
-# 3C: Concatenar todos os contratos
-frames_todos_contr = []
-if not df_contratos_principal.empty:
-    frames_todos_contr.append(df_contratos_principal)
-if frames_contr_extra:
-    frames_todos_contr.append(pd.concat(frames_contr_extra, ignore_index=True))
-
-df_contratos = pd.concat(frames_todos_contr, ignore_index=True) if frames_todos_contr else pd.DataFrame()
-
-if df_contratos.empty:
-    print("  [AVISO] df_contratos vazio.")
-else:
-    # Criar chave_licitacao nos contratos extras que ainda nao tem
-    if "chave_licitacao" not in df_contratos.columns:
-        df_contratos, _ = preparar_chave(
-            df_contratos,
-            [("numeroLicitacao", "anoLicitacao"), ("numeroProcessoCompra", "anoProcessoCompra")]
+    if {"dataPublicacao", "dataHomologacao"}.issubset(df27.columns):
+        df27["dias_tramitacao"] = (
+            (df27["dataHomologacao"] - df27["dataPublicacao"])
+            .dt.days.clip(lower=0)
         )
     else:
-        # Garantir que contratos extras tambem tenham chave_licitacao
-        mask_sem_chave = df_contratos["chave_licitacao"].isna()
-        if mask_sem_chave.any():
-            df_tmp = df_contratos[mask_sem_chave].copy()
-            df_tmp, ok_tmp = preparar_chave(
-                df_tmp,
-                [("numeroLicitacao", "anoLicitacao"), ("numeroProcessoCompra", "anoProcessoCompra")]
-            )
-            if ok_tmp:
-                df_contratos.loc[mask_sem_chave, "chave_licitacao"] = df_tmp["chave_licitacao"]
+        df27["dias_tramitacao"] = np.nan
 
-    if "cnpjCpfContratado" not in df_contratos.columns and "cnpjCpf" in df_contratos.columns:
-        df_contratos["cnpjCpfContratado"] = df_contratos["cnpjCpf"]
-    if "cnpjCpfContratado" in df_contratos.columns:
-        df_contratos["cnpjCpfContratado"] = df_contratos["cnpjCpfContratado"].apply(limpar_chave)
+    # -------------------------------------------------------------------------
+    # 1G. Tipo de processo
+    # -------------------------------------------------------------------------
+    df27["tipo_processo"] = tipo_proc
 
-    # Deduplicar
-    antes_c = len(df_contratos)
-    chave_dedup_c = [c for c in ["chave_licitacao", "cnpjCpfContratado"] if c in df_contratos.columns]
-    df_contratos = df_contratos.drop_duplicates(subset=chave_dedup_c, keep="last")
-    print(f"  Duplicatas removidas de df_contratos: {antes_c - len(df_contratos):,}")
-
-    diagnostico_merge(
-        "contratos -> processos",
-        set(df_contratos["chave_licitacao"].dropna()) - {""},
-        set(df_processos["chave_licitacao"].dropna()) - {""}
-    )
-
-    # Usar dias_vigencia da Relacao de Contratos (unica fonte com as datas)
-    agg_contr = (df_contratos.groupby("chave_licitacao")
-                 .agg(
-                     qtd_contratos       = ("chave_licitacao", "count"),
-                     media_valorInicial  = ("valorInicial",    "mean"),
-                     media_valorFinal    = ("valorFinal",      "mean"),
-                     media_dias_vigencia = ("dias_vigencia",   "mean"),  # NaN ignorado pelo mean()
-                 )
-                 .reset_index())
-
-    df_processos = df_processos.merge(agg_contr, on="chave_licitacao", how="left")
-    preenchidos = df_processos["media_dias_vigencia"].notna().sum()
-    print(f"  OK Contratos vinculados | media_dias_vigencia preenchida: "
-          f"{preenchidos:,} de {len(df_processos):,} licitacoes "
-          f"({preenchidos/len(df_processos)*100:.1f}%)")
-
-    # VAR #3: media_variacao_contr - variacao percentual media dos contratos
-    if {"media_valorInicial", "media_valorFinal"}.issubset(df_processos.columns):
-        df_processos["media_variacao_contr"] = np.where(
-            df_processos["media_valorInicial"] > 0,
-            (df_processos["media_valorFinal"] - df_processos["media_valorInicial"])
-            / df_processos["media_valorInicial"] * 100,
-            np.nan
-        )
-        _validos_vc = df_processos["media_variacao_contr"].notna().sum()
-        print(f"  media_variacao_contr calculada: {_validos_vc:,} licitacoes")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 4 - CONTAGEM DE PARTICIPANTES
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 4 - CONTAGEM DE PARTICIPANTES")
-print("="*60)
-
-df_processos["qtd_participantes"] = 0
-df_processos["houve_disputa"]     = 0
-
-if df_part.empty:
-    print("  [AVISO] df_participantes vazio.")
-elif df_contratos.empty or "chave_licitacao" not in df_contratos.columns:
-    print("  [AVISO] df_contratos sem chave_licitacao.")
-else:
-    col_cnpj_part = next(
-        (c for c in ["cnpjCpfFornecedor", "cnpjCpf", "cnpj", "cpf"] if c in df_part.columns), None
-    )
-    if col_cnpj_part is None:
-        print("  [ERRO] Coluna CNPJ nao encontrada em df_part.")
-    else:
-        df_part[col_cnpj_part] = df_part[col_cnpj_part].apply(limpar_chave)
-
-        mapa_part = (df_contratos[["cnpjCpfContratado", "chave_licitacao"]]
-                     .dropna().drop_duplicates())
-
-        diagnostico_merge(
-            "participantes (CNPJ) -> contratos",
-            set(df_part[col_cnpj_part].dropna()),
-            set(mapa_part["cnpjCpfContratado"].dropna())
-        )
-
-        df_part_chave = df_part.merge(
-            mapa_part, left_on=col_cnpj_part, right_on="cnpjCpfContratado", how="inner"
-        )
-
-        # BUG #7: deduplicar por (cnpj + chave), sem _arquivo_origem
-        antes_p = len(df_part_chave)
-        df_part_chave = df_part_chave.drop_duplicates(
-            subset=[col_cnpj_part, "chave_licitacao"], keep="last"
-        )
-        print(f"  Duplicatas removidas de df_part: {antes_p - len(df_part_chave):,}")
-
-        if not df_part_chave.empty:
-            agg_part = (df_part_chave.groupby("chave_licitacao")
-                        .size().reset_index(name="qtd_participantes"))
-            df_processos = df_processos.drop(columns=["qtd_participantes"], errors="ignore")
-            df_processos = df_processos.merge(agg_part, on="chave_licitacao", how="left")
-            df_processos["qtd_participantes"] = df_processos["qtd_participantes"].fillna(0).astype(int)
-            print(f"  OK Participantes vinculados: {len(df_part_chave):,}")
-            print(df_processos["qtd_participantes"].value_counts().sort_index().head(10).to_string())
-
-    df_processos["houve_disputa"] = (df_processos["qtd_participantes"] > 1).astype(int)
-
-# VAR #4: interact_part_logval - interacao entre competicao e escala de valor
-if "valorEstimado" in df_processos.columns:
-    df_processos["interact_part_logval"] = (
-        df_processos["qtd_participantes"]
-        * np.log1p(df_processos["valorEstimado"].clip(lower=0))
-    )
-    print(f"  interact_part_logval calculado: "
-          f"{df_processos['interact_part_logval'].notna().sum():,} licitacoes")
-
-# VAR #5: formaJulgamento_cod - codificacao categorica de formaJulgamento
-if "formaJulgamento" in df_processos.columns:
-    df_processos["formaJulgamento_cod"] = (
-        pd.Categorical(df_processos["formaJulgamento"].astype(str)).codes.astype(float)
-    )
-    df_processos.loc[df_processos["formaJulgamento"].isna(), "formaJulgamento_cod"] = np.nan
-    _cats_fj = df_processos["formaJulgamento"].dropna().unique()
-    print(f"  formaJulgamento_cod: {len(_cats_fj)} categorias: "
-          f"{sorted(str(c) for c in _cats_fj)}")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 5 - EXECUCAO DETALHADA DE DESPESAS
-#
-# FIX #1: usar coluna 'licitacao' de df_27_unificado (ja tem o numeroLicitacao)
-# em vez de tentar cruzar via _arquivo_origem com df_licitacao_unificado.
-#
-# Estrutura da coluna 'licitacao':
-#   - Pode ser um numero puro:  "72"
-#   - Pode ser JSON:            {"numeroLicitacao":"72","dataLicitacao":"..."}
-#   - Pode ser vazio/nulo
-#
-# Estrategia:
-#   a) Extrair numeroLicitacao da coluna 'licitacao' com regex
-#   b) Inferir ano pelo anoExercicio do empenho
-#   c) Montar chave_licitacao e agrupar por ela
-#   d) Fallback: para empenhos sem licitacao, vincular via credor (CNPJ) -> contratos
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 5 - EXECUCAO DETALHADA DE DESPESAS")
-print("="*60)
-
-# Carregar despesas de todos os anos configurados
-_frames_desp_todos = []
-for _label_d, _pasta_d in FONTES_DESPESAS_LISTA:
-    _df_d = ler_csvs(_pasta_d, "df_27_unificado", _label_d)
-    if _df_d.empty:
-        continue
-
-    # Normalizar valores monetarios por pasta (antes de concat para evitar conflito de tipos)
-    for col in ["valorEmpenho", "valorLiquidadoEmpenho", "valorPagoEmpenho",
-                "valorEmpenhado", "saldoAPagar", "saldoALiquidar"]:
-        if col in _df_d.columns:
-            _df_d[col] = normalizar_moeda(_df_d[col])
-
-    # FIX #5 (v8): Resolver chave_licitacao via tabela de referencia df_licitacao_unificado
-    # A coluna 'licitacao' em df_27 contem nomes de arquivo (ex: licitacao_cf3d7cf0.csv).
-    _df_d["chave_licitacao"] = None
-    if "licitacao" in _df_d.columns:
-        _df_lic_ref = ler_csvs(_pasta_d, "df_licitacao_unificado", _label_d + "_licref")
-        if (not _df_lic_ref.empty
-                and "numeroLicitacao" in _df_lic_ref.columns
-                and "origem_arquivo" in _df_lic_ref.columns):
-            _lic_parts = _df_lic_ref["numeroLicitacao"].str.strip().str.split("/", n=1, expand=True)
-            _df_lic_ref["_num_lic"] = _lic_parts[0].apply(limpar_chave)
-            _df_lic_ref["_ano_lic"] = (_lic_parts[1].apply(limpar_chave)
-                                       if _lic_parts.shape[1] > 1 else "")
-            _df_lic_ref["_chave_ref"] = (_df_lic_ref["_num_lic"] + "_"
-                                         + _df_lic_ref["_ano_lic"])
-            _df_lic_ref["_chave_ref"] = _df_lic_ref["_chave_ref"].replace(
-                {"_": None, "": None})
-
-            _lookup_lic = (_df_lic_ref[["origem_arquivo", "_chave_ref"]]
-                           .drop_duplicates(subset=["origem_arquivo"])
-                           .rename(columns={"origem_arquivo": "_lic_fname"}))
-            _df_d = _df_d.merge(_lookup_lic, left_on="licitacao",
-                                right_on="_lic_fname", how="left")
-            _df_d["chave_licitacao"] = _df_d["_chave_ref"]
-            _df_d = _df_d.drop(columns=["_lic_fname", "_chave_ref"], errors="ignore")
-            _v = _df_d["chave_licitacao"].notna().sum()
-            print(f"  [{_label_d}] Empenhos vinculados via tabela licitacao: "
-                  f"{_v:,} de {len(_df_d):,} ({_v/len(_df_d)*100:.1f}%)")
-
-    # Guardar pasta de origem para resolucao CNPJ do credor (etapa posterior)
-    _df_d["_pasta_despesas"] = _pasta_d
-    _frames_desp_todos.append(_df_d)
-
-df_desp = (pd.concat(_frames_desp_todos, ignore_index=True)
-           if _frames_desp_todos else pd.DataFrame())
-
-if df_desp.empty:
-    print("  [AVISO] df_despesas vazio - camada de despesas ignorada.")
-else:
-    # FIX #5b (v8): fallback via CNPJ do credor resolvido por pasta (df_credor_unificado)
-    # A coluna 'credor' em df_27 contem nomes de arquivo (ex: credor_56792299.csv),
-    # nao CNPJs diretos. Resolvemos por pasta para manter a correspondencia correta.
-    sem_chave = df_desp["chave_licitacao"].isna().sum()
-    print(f"  Empenhos sem chave_licitacao apos vinculacao direta: {sem_chave:,}")
-
-    if sem_chave > 0 and not df_contratos.empty and "chave_licitacao" in df_contratos.columns:
-        # Carregar tabelas de referencia de credor de todos os anos
-        # (UUIDs nos nomes de arquivo sao unicos entre anos, sem colisao)
-        _frames_cred_ref = []
-        for _label_d, _pasta_d in FONTES_DESPESAS_LISTA:
-            _dcr = ler_csvs(_pasta_d, "df_credor_unificado", _label_d + "_credref")
-            if not _dcr.empty:
-                _frames_cred_ref.append(_dcr)
-        df_cred_ref = (pd.concat(_frames_cred_ref, ignore_index=True)
-                       if _frames_cred_ref else pd.DataFrame())
-        if not df_cred_ref.empty and "cnpjCpfCredor" in df_cred_ref.columns and "origem_arquivo" in df_cred_ref.columns:
-            lookup_cred = (df_cred_ref[["origem_arquivo", "cnpjCpfCredor"]]
-                           .drop_duplicates(subset=["origem_arquivo"])
-                           .rename(columns={"origem_arquivo": "_cred_fname"}))
-            lookup_cred["cnpjCpfCredor"] = lookup_cred["cnpjCpfCredor"].apply(limpar_chave)
-
-            df_desp = df_desp.merge(lookup_cred, left_on="credor", right_on="_cred_fname", how="left")
-            df_desp = df_desp.drop(columns=["_cred_fname"], errors="ignore")
-            col_credor_resolved = "cnpjCpfCredor"
-            print(f"  CNPJ credor resolvido para {df_desp['cnpjCpfCredor'].notna().sum():,} empenhos")
-        else:
-            # Sem tabela de referencia, tentar coluna direta (dados sem filename ref)
-            col_credor_resolved = next(
-                (c for c in ["cnpjCpfCredor", "cnpjCpf"] if c in df_desp.columns), None
-            )
-
-        if col_credor_resolved and col_credor_resolved in df_desp.columns:
-            df_desp["_cnpj_credor"] = df_desp[col_credor_resolved].apply(limpar_chave)
-            # Filtrar apenas CNPJs validos (nao mascarados, formato XX.XXX.XXX/XXXX-XX ou similar)
-            mask_cnpj_valido = df_desp["_cnpj_credor"].str.len().between(11, 20)
-            mapa_cnpj_desp = (df_contratos[["cnpjCpfContratado", "chave_licitacao"]]
-                              .dropna()
-                              .drop_duplicates(subset=["cnpjCpfContratado"], keep="first"))
-
-            mask_sem = df_desp["chave_licitacao"].isna() & mask_cnpj_valido
-            if mask_sem.any():
-                df_fallback = df_desp[mask_sem][["_cnpj_credor"]].merge(
-                    mapa_cnpj_desp, left_on="_cnpj_credor", right_on="cnpjCpfContratado", how="left"
-                )
-                df_desp.loc[mask_sem, "chave_licitacao"] = df_fallback["chave_licitacao"].values
-
-            vinc_fallback = df_desp["chave_licitacao"].notna().sum()
-            print(f"  Empenhos vinculados apos fallback CNPJ: {vinc_fallback:,} de {len(df_desp):,} "
-                  f"({vinc_fallback/len(df_desp)*100:.1f}%)")
-        else:
-            print("  [AVISO] CNPJ do credor nao resolvido - fallback ignorado.")
-
-    diagnostico_merge(
-        "despesas -> processos",
-        set(df_desp["chave_licitacao"].dropna()) - {""},
-        set(df_processos["chave_licitacao"].dropna()) - {""}
-    )
-
-    # Agregar por chave_licitacao
-    agg_dict = {"qtd_empenhos": pd.NamedAgg("chave_licitacao", "count")}
-    for col, alias in [("valorEmpenho",          "soma_valorEmpenho"),
-                       ("valorLiquidadoEmpenho", "soma_valorLiquidadoEmpenho"),
-                       ("valorPagoEmpenho",      "soma_valorPagoEmpenho")]:
-        if col in df_desp.columns:
-            agg_dict[alias] = pd.NamedAgg(col, "sum")
-
-    df_desp_valid = df_desp[df_desp["chave_licitacao"].notna()
-                            & (df_desp["chave_licitacao"] != "")]
-
-    agg_desp = df_desp_valid.groupby("chave_licitacao").agg(**agg_dict).reset_index()
-
-    # Moda de descritivos categoricos
-    for col_orig, col_dest in [("descricaoOrgao",    "orgao_principal"),
-                               ("descricaoPrograma", "programa_principal"),
-                               ("descricaoFuncao",   "funcao_principal"),
-                               ("descricaoUnidade",  "unidade_principal")]:
-        if col_orig in df_desp_valid.columns:
-            moda_s = (df_desp_valid.groupby("chave_licitacao")[col_orig]
-                      .agg(lambda x: x.dropna().mode().iloc[0]
-                           if len(x.dropna().mode()) > 0 else None)
-                      .reset_index().rename(columns={col_orig: col_dest}))
-            agg_desp = agg_desp.merge(moda_s, on="chave_licitacao", how="left")
-
-    df_processos = df_processos.merge(agg_desp, on="chave_licitacao", how="left")
-    preenchidos_desp = df_processos["soma_valorEmpenho"].notna().sum()
-    print(f"  OK Despesas agregadas: {len(agg_desp):,} licitacoes com empenhos | "
-          f"Vinculadas a df_processos: {preenchidos_desp:,} de {len(df_processos):,} "
-          f"({preenchidos_desp/len(df_processos)*100:.1f}%)")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 6 - FORNECEDORES SANCIONADOS
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 6 - FORNECEDORES SANCIONADOS")
-print("="*60)
-
-df_sanc = pd.DataFrame()
-if PASTA_SANCIONADOS and os.path.isdir(PASTA_SANCIONADOS):
-    df_sanc = ler_csvs(PASTA_SANCIONADOS, "df_27_unificado", "sancionados")
-
-df_processos["contratado_sancionado"] = 0
-
-if df_sanc.empty:
-    print("  [AVISO] Base de sancionados vazia.")
-elif not df_contratos.empty and "cnpjCpfContratado" in df_contratos.columns:
-    col_cnpj_sanc = next(
-        (c for c in ["cnpjCpf", "cnpj", "cpfCnpj"] if c in df_sanc.columns), None
-    )
-    if col_cnpj_sanc:
-        sancionados_set = set(df_sanc[col_cnpj_sanc].dropna().apply(limpar_chave))
-        df_contratos["contratado_sancionado"] = (
-            df_contratos["cnpjCpfContratado"].isin(sancionados_set).astype(int)
-        )
-        if "chave_licitacao" in df_contratos.columns:
-            flag_sanc = (df_contratos.groupby("chave_licitacao")["contratado_sancionado"]
-                         .max().reset_index())
-            df_processos = df_processos.drop(columns=["contratado_sancionado"], errors="ignore")
-            df_processos = df_processos.merge(flag_sanc, on="chave_licitacao", how="left")
-            df_processos["contratado_sancionado"] = (df_processos["contratado_sancionado"]
-                                                      .fillna(0).astype(int))
-            print(f"  OK Licitacoes com contratado sancionado: "
-                  f"{df_processos['contratado_sancionado'].sum():,}")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 7 - PREPARACAO DOS ITENS VENCEDORES
-#
-# FIX #2: usar coluna 'numero' do df_venc (= numeroLicitacao do item)
-# para criar chave_licitacao diretamente, sem depender do mapa CNPJ -> contrato.
-# O mapa CNPJ continua como fallback para os ~1.3% de itens sem 'numero'.
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 7 - PREPARACAO DOS ITENS VENCEDORES")
-print("="*60)
-
-if df_venc.empty:
-    print("  [AVISO] df_itensvencedores vazio.")
-else:
-    print(f"  Colunas df_venc: {df_venc.columns.tolist()}")
-
+    # -------------------------------------------------------------------------
+    # 1H. Converter colunas monetarias de dfiv
+    # -------------------------------------------------------------------------
     for col in ["valorTotalReferencia", "valorTotalVencedor",
-                "valorUnitarioReferencia", "valorUnitarioVencedor"]:
-        if col in df_venc.columns:
-            df_venc[col] = normalizar_moeda(df_venc[col])
+                "valorUnitarioReferencia", "valorUnitarioVencedor", "quantidade"]:
+        if col in dfiv.columns:
+            dfiv[col] = para_float(dfiv[col])
 
-    # FIX #2a: chave direta via coluna 'numero' (numeroLicitacao do item)
-    if "numero" in df_venc.columns:
-        # Inferir ano a partir do campo _fonte (ex: 'licit_2020' -> '2020').
-        # FIX #9: antes estava fixo em '_2019', corrompendo todos os itens de 2020.
-        _num_venc = df_venc["numero"].apply(limpar_chave)
-        if "_fonte" in df_venc.columns:
-            _ano_venc = df_venc["_fonte"].str.extract(r"(\d{4})$")[0].fillna("2019")
+    # Valor de referencia zero = placeholder do portal, tratar como nulo
+    if "valorTotalReferencia" in dfiv.columns:
+        dfiv.loc[dfiv["valorTotalReferencia"] == 0, "valorTotalReferencia"] = np.nan
+
+    # -------------------------------------------------------------------------
+    # 1I. Economia e ratio no nivel do item
+    # -------------------------------------------------------------------------
+    if {"valorTotalReferencia", "valorTotalVencedor"}.issubset(dfiv.columns):
+        dfiv["economia_item"] = dfiv["valorTotalReferencia"] - dfiv["valorTotalVencedor"]
+        dfiv["economia_item_pct"] = np.where(
+            dfiv["valorTotalReferencia"].notna(),
+            (dfiv["economia_item"] / dfiv["valorTotalReferencia"] * 100).clip(-100, 100),
+            np.nan,
+        )
+        dfiv["ratio_vencedor_referencia"] = np.where(
+            dfiv["valorTotalReferencia"].notna(),
+            dfiv["valorTotalVencedor"] / dfiv["valorTotalReferencia"],
+            np.nan,
+        )
+
+    # -------------------------------------------------------------------------
+    # 1J. Agregados de itens por UUID de licitacao (para enriquecer df_27)
+    # -------------------------------------------------------------------------
+    if "origem_arquivo" in dfiv.columns:
+        agg_dict = {"n_itens_licitacao": ("origem_arquivo", "count")}
+        if "cnpjCpfVencedor" in dfiv.columns:
+            agg_dict["n_vencedores_distintos"] = ("cnpjCpfVencedor", "nunique")
+        if "economia_item_pct" in dfiv.columns:
+            agg_dict["media_desconto_item"]     = ("economia_item_pct", "mean")
+            agg_dict["amplitude_desconto_item"] = (
+                "economia_item_pct",
+                lambda x: (x.max() - x.min()) if x.notna().any() else np.nan,
+            )
+
+        agg_itens = (dfiv.groupby("origem_arquivo")
+                     .agg(**agg_dict)
+                     .reset_index()
+                     .rename(columns={"origem_arquivo": "itensVencedores"}))
+
+        if "itensVencedores" in df27.columns:
+            df27 = df27.merge(agg_itens, on="itensVencedores", how="left")
         else:
-            _ano_venc = "2019"
-        df_venc["chave_licitacao"] = _num_venc + "_" + _ano_venc
-        # Limpar chaves onde numero estava vazio (resultado seria "_YYYY")
-        df_venc["chave_licitacao"] = df_venc["chave_licitacao"].where(
-            _num_venc.ne("") & _num_venc.notna(), other=None
-        )
-        df_venc["chave_licitacao"] = df_venc["chave_licitacao"].replace({"": None})
+            for col in agg_itens.columns[1:]:
+                df27[col] = np.nan
 
-        direto = df_venc["chave_licitacao"].notna().sum()
-        print(f"  Itens com chave_licitacao direta (via 'numero'): "
-              f"{direto:,} de {len(df_venc):,} ({direto/len(df_venc)*100:.1f}%)")
+    # -------------------------------------------------------------------------
+    # 1K. [FIX-02] Reconstruir valorHomologado onde ausente
+    # -------------------------------------------------------------------------
+    df27["valorHomologado_reconstruido"] = 0
+
+    if "itensVencedores" in df27.columns and "valorTotalVencedor" in dfiv.columns:
+        soma_iv = (dfiv.groupby("origem_arquivo")["valorTotalVencedor"]
+                   .sum()
+                   .reset_index(name="_soma_venc")
+                   .rename(columns={"origem_arquivo": "itensVencedores"}))
+
+        df27 = df27.merge(soma_iv, on="itensVencedores", how="left")
+
+        mask_rec = df27["valorHomologado"].isna() & df27["_soma_venc"].notna()
+        df27.loc[mask_rec, "valorHomologado"]              = df27.loc[mask_rec, "_soma_venc"]
+        df27.loc[mask_rec, "valorHomologado_reconstruido"] = 1
+        df27 = df27.drop(columns=["_soma_venc"])
+
+        n_rec = mask_rec.sum()
+        print(f"  [FIX-02] valorHomologado reconstruido: {n_rec} licitacoes")
+
+    # -------------------------------------------------------------------------
+    # 1L. Economia ao nivel da licitacao
+    # -------------------------------------------------------------------------
+    if {"valorEstimado", "valorHomologado"}.issubset(df27.columns):
+        df27["economia_absoluta"] = np.where(
+            df27["valorEstimado"].notna() & df27["valorHomologado"].notna(),
+            df27["valorEstimado"] - df27["valorHomologado"],
+            np.nan,
+        )
+        df27["economia_pct_licit"] = np.where(
+            df27["valorEstimado"].notna() & (df27["valorEstimado"] > 0),
+            df27["economia_absoluta"] / df27["valorEstimado"] * 100,
+            np.nan,
+        )
     else:
-        df_venc["chave_licitacao"] = None
-        print("  [AVISO] Coluna 'numero' nao encontrada em df_venc.")
+        df27["economia_absoluta"]  = np.nan
+        df27["economia_pct_licit"] = np.nan
 
-    # FIX #2b: fallback via CNPJ para itens sem chave
-    col_cnpj_venc = next(
-        (c for c in ["cnpjCpfVencedor", "cnpjCpf", "cnpj"] if c in df_venc.columns), None
-    )
-    sem_chave_venc = df_venc["chave_licitacao"].isna().sum()
-
-    if sem_chave_venc > 0 and col_cnpj_venc and not df_contratos.empty:
-        df_venc[col_cnpj_venc] = df_venc[col_cnpj_venc].apply(limpar_chave)
-
-        # BUG #8: mapa deduplicado por CNPJ (keep="first") evita explosao cartesiana
-        mapa_venc = (df_contratos[["cnpjCpfContratado", "chave_licitacao"]]
-                     .dropna()
-                     .drop_duplicates(subset=["cnpjCpfContratado"], keep="first"))
-
-        mask_sem = df_venc["chave_licitacao"].isna()
-        df_fb = df_venc[mask_sem][[col_cnpj_venc]].merge(
-            mapa_venc, left_on=col_cnpj_venc, right_on="cnpjCpfContratado", how="left"
-        )
-        df_venc.loc[mask_sem, "chave_licitacao"] = df_fb["chave_licitacao"].values
-        print(f"  Itens vinculados apos fallback CNPJ: "
-              f"{df_venc['chave_licitacao'].notna().sum():,} de {len(df_venc):,}")
-
-    # FIX #9b: Deduplicar itens vencedores antes do merge.
-    # Alguns itens aparecem em multiplos arquivos UUID do portal com valores ligeiramente
-    # diferentes. O concat coloca 'finalizado' depois de 'licit', entao keep='last'
-    # privilegia as entradas de Processos Finalizados (resultado mais definitivo).
-    _key_venc_dedup = [c for c in ["chave_licitacao", "codigo", "cnpjCpfVencedor", "numero"]
-                       if c in df_venc.columns]
-    if _key_venc_dedup:
-        _antes_vd = len(df_venc)
-        df_venc = df_venc.drop_duplicates(subset=_key_venc_dedup, keep="last")
-        print(f"  Duplicatas removidas de df_venc: {_antes_vd - len(df_venc):,} | "
-              f"Restaram: {len(df_venc):,}")
-
-    diagnostico_merge(
-        "itensvencedores -> processos",
-        set(df_venc["chave_licitacao"].dropna()) - {""},
-        set(df_processos["chave_licitacao"].dropna()) - {""}
-    )
-
-    # Economia por item
-    df_venc["economia_item"] = (df_venc["valorTotalReferencia"]
-                                - df_venc["valorTotalVencedor"])
-    df_venc["economia_item_pct"] = np.where(
-        df_venc["valorTotalReferencia"] > 0,
-        (df_venc["economia_item"] / df_venc["valorTotalReferencia"]) * 100,
-        np.nan
-    )
-    df_venc["ratio_vencedor_referencia"] = np.where(
-        df_venc["valorTotalReferencia"] > 0,
-        df_venc["valorTotalVencedor"] / df_venc["valorTotalReferencia"],
-        np.nan
-    )
-
-    # VAR #6: amplitude_desconto_item e media_desconto_item
-    # Agrega economia_item_pct ao nivel da licitacao e junta em df_processos.
-    # FIX #10: alguns itens do portal registram valorTotalReferencia = 1,00 como
-    # placeholder (ex.: contratos de uso de espacos culturais), gerando
-    # economia_item_pct na casa de -679.000%. Esses outliers distorcem
-    # amplitude_desconto_item para milhoes de pontos percentuais.
-    # Solucao: clipar economia_item_pct em [-100, 100] antes de agregar,
-    # preservando descontos validos e descartando artefatos de dados.
-    if "chave_licitacao" in df_venc.columns and "economia_item_pct" in df_venc.columns:
-        _venc_desc = df_venc.dropna(subset=["economia_item_pct", "chave_licitacao"]).copy()
-        _venc_desc["economia_item_pct"] = _venc_desc["economia_item_pct"].clip(-100, 100)
-        if not _venc_desc.empty:
-            agg_desc = (_venc_desc
-                        .groupby("chave_licitacao")
-                        .agg(
-                            media_desconto_item     = ("economia_item_pct", "mean"),
-                            amplitude_desconto_item = ("economia_item_pct",
-                                                       lambda x: x.max() - x.min()),
-                        )
-                        .reset_index())
-            df_processos = df_processos.merge(agg_desc, on="chave_licitacao", how="left")
-            print(f"  media_desconto_item calculada: "
-                  f"{df_processos['media_desconto_item'].notna().sum():,} licitacoes")
-            print(f"  amplitude_desconto_item calculada: "
-                  f"{df_processos['amplitude_desconto_item'].notna().sum():,} licitacoes")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 8 - MONTAGEM DA BASE FINAL
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 8 - MONTAGEM DA BASE FINAL")
-print("="*60)
-
-colunas_processos = [c for c in [
-    "chave_licitacao",
-    "modalidade", "tipoObjeto", "formaJulgamento", "objeto",
-    "valorEstimado", "valorHomologado",
-    "economia_absoluta", "economia_pct",
-    "qtd_participantes", "houve_disputa",
-    "qtd_contratos", "media_valorInicial", "media_valorFinal", "media_dias_vigencia",
-    "soma_valorEmpenho", "soma_valorLiquidadoEmpenho", "soma_valorPagoEmpenho",
-    "qtd_empenhos", "orgao_principal", "programa_principal",
-    "funcao_principal", "unidade_principal",
-    "contratado_sancionado",
-    # Variaveis adicionadas (v10)
-    "dias_tramitacao", "log_dias_tramitacao",
-    "media_variacao_contr",
-    "interact_part_logval",
-    "formaJulgamento_cod",
-    "media_desconto_item", "amplitude_desconto_item",
-] if c in df_processos.columns]
-
-if df_venc.empty or "chave_licitacao" not in df_venc.columns:
-    print("  [AVISO] df_venc sem chave_licitacao. Usando df_processos como base final.")
-    base_final = df_processos.copy()
-else:
-    base_final = df_venc.merge(
-        df_processos[colunas_processos], on="chave_licitacao", how="left"
-    )
-
-    antes_f = len(base_final)
-    # FIX #6: excluir tambem 'origem_arquivo' (coluna do script.py) da deduplicacao,
-    # pois Processos Licitatorios e Processos Licitatorios Finalizados sao o mesmo
-    # dado baixado de duas secoes diferentes do portal — diferem so no nome do arquivo.
-    cols_id = [c for c in base_final.columns
-               if c not in ["_fonte", "_arquivo_origem", "origem_arquivo"]]
-    base_final = base_final.drop_duplicates(subset=cols_id)
-    if antes_f - len(base_final) > 0:
-        print(f"  Duplicatas residuais removidas: {antes_f - len(base_final):,}")
-
-    if "valorEstimado" in base_final.columns:
-        vinc  = base_final["valorEstimado"].notna().sum()
-        total = len(base_final)
-        print(f"  Itens com dados da licitacao pai: {vinc:,} de {total:,} ({vinc/total*100:.1f}%)")
-
-# -----------------------------------------------------------------------------
-# FILTRO DE CONSISTENCIA PARA CALCULO DO ALVO
-# -----------------------------------------------------------------------------
-# Mantem apenas itens onde as tres colunas criticas para o calculo do alvo
-# estao preenchidas. Isso alinha ratio_vencedor_referencia (nivel item),
-# valorEstimado e valorHomologado (nivel licitacao), garantindo que cada
-# linha contribua de forma consistente para a analise de razao_pago_homolog.
-COLUNAS_CONSISTENCIA = [
-    "ratio_vencedor_referencia",
-    "valorEstimado",
-    "valorHomologado",
-]
-cols_ok = [c for c in COLUNAS_CONSISTENCIA if c in base_final.columns]
-if len(cols_ok) == len(COLUNAS_CONSISTENCIA):
-    antes = len(base_final)
-    base_final = base_final.dropna(subset=cols_ok).reset_index(drop=True)
-    removidas = antes - len(base_final)
-    print(f"\n  Filtro de consistencia ({', '.join(cols_ok)}):")
-    print(f"    Removidas: {removidas:,} linhas com nulos em alguma das 3 colunas")
-    print(f"    Restantes: {len(base_final):,} linhas")
-else:
-    faltam = [c for c in COLUNAS_CONSISTENCIA if c not in base_final.columns]
-    print(f"  [AVISO] Filtro de consistencia pulado: colunas ausentes {faltam}")
-
-print(f"\n  Base final: {len(base_final):,} linhas | {base_final.shape[1]} colunas")
-if len(base_final) < 20_000:
-    print(f"  ATENCAO: abaixo da meta de 20.000 linhas (adicione mais anos).")
-else:
-    print(f"  OK Meta de 20.000 linhas atingida!")
-
-
-# -----------------------------------------------------------------------------
-# ETAPA 9 - EXPORTACAO
-# -----------------------------------------------------------------------------
-
-print("\n" + "="*60)
-print("ETAPA 9 - EXPORTACAO")
-print("="*60)
-
-# FIX #5 / FIX #11: arredondar todas as colunas float antes de exportar.
-#   - Colunas monetarias e percentuais: 2 casas decimais
-#   - Demais floats (logs, indices, flags): 6 casas decimais
-# Isso evita que Python grave 16 digitos significativos (ex.: 2.9444389791664403),
-# que o Excel em locale pt-BR interpreta como inteiro gigante ao tratar '.' como
-# separador de milhar.
-# O separador decimal e ',' (padrao BR) para compatibilidade nativa com Excel.
-KEYWORDS_2 = ["valor", "economia", "media", "soma", "ratio", "desconto",
-              "variacao", "pago", "liquidado", "empenho"]
-for c in base_final.columns:
-    if not pd.api.types.is_float_dtype(base_final[c]):
+    # -------------------------------------------------------------------------
+    # 1M. Montar base no nivel do item (join dfiv <- df_27)
+    # -------------------------------------------------------------------------
+    if "itensVencedores" not in df27.columns:
+        print(f"  [AVISO] Coluna itensVencedores ausente em {label}. Pulando fonte.")
         continue
-    if any(kw in c.lower() for kw in KEYWORDS_2):
-        base_final[c] = base_final[c].round(2)
-    else:
-        base_final[c] = base_final[c].round(6)
 
+    colunas_df27 = [c for c in [
+        "chave_licitacao",
+        "tipo_processo",
+        "modalidade",            # ausente em Dispensa — ok, sera None
+        "tipoObjeto",
+        "formaJulgamento",       # ausente em Dispensa — ok, sera None
+        "objeto",
+        "valorEstimado",
+        "valorHomologado",
+        "valorHomologado_reconstruido",
+        "economia_absoluta",
+        "economia_pct_licit",
+        "qtd_participantes",
+        "dias_tramitacao",
+        "n_itens_licitacao",
+        "n_vencedores_distintos",
+        "media_desconto_item",
+        "amplitude_desconto_item",
+        "orgao_principal",
+        "funcao_principal",
+        "programa_principal",
+        "itensVencedores",
+    ] if c in df27.columns]
+
+    base_fonte = dfiv.merge(
+        df27[colunas_df27],
+        left_on="origem_arquivo",
+        right_on="itensVencedores",
+        how="inner",
+    )
+    base_fonte["_fonte"] = label
+    frames_itens.append(base_fonte)
+    print(f"  -> {len(base_fonte):,} itens exportados")
+
+
+# =============================================================================
+# ETAPA 2 — CONCATENAR TODAS AS FONTES
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 2 — CONCATENACAO")
+print("=" * 60)
+
+if not frames_itens:
+    raise RuntimeError("Nenhum item carregado. Verifique os caminhos das pastas.")
+
+base_final = pd.concat(frames_itens, ignore_index=True)
+print(f"  Total bruto: {len(base_final):,} itens")
+
+# Deduplicar: quando a mesma chave_licitacao existe em LICITACAO e DISPENSA,
+# manter apenas a versao LICITACAO (Finalizados e a fonte mais completa/definitiva)
+chaves_licitacao = set(
+    base_final.loc[base_final["tipo_processo"] == "LICITACAO", "chave_licitacao"]
+)
+mask_dup = (
+    (base_final["tipo_processo"] == "DISPENSA")
+    & (base_final["chave_licitacao"].isin(chaves_licitacao))
+)
+n_dup = mask_dup.sum()
+if n_dup > 0:
+    base_final = base_final[~mask_dup].copy()
+    print(f"  Deduplicacao: {n_dup:,} itens DISPENSA removidos "
+          f"(chave_licitacao ja presente em LICITACAO)")
+print(f"  Total apos deduplicacao: {len(base_final):,} itens")
+
+# Garantir que colunas opcionais existam mesmo que uma fonte nao as tenha
+for col, fill in [
+    ("modalidade",        None),
+    ("formaJulgamento",   None),
+    ("orgao_principal",   None),
+    ("funcao_principal",  None),
+    ("programa_principal",None),
+]:
+    if col not in base_final.columns:
+        base_final[col] = fill
+
+
+# =============================================================================
+# ETAPA 3 — FORNECEDORES SANCIONADOS
+#   Colunas criadas:
+#     vencedor_sancionado      — 1 se o CNPJ do vencedor consta na lista
+#     tipo_sancao_vencedor     — sancao mais grave registrada para esse fornecedor
+#                                (INIDONEIDADE > IMPEDIMENTO > SUSPENSAO >
+#                                 MULTA > ADVERTENCIA)
+#     sancao_ativa             — 1 se alguma sancao nao tem data de termino ou
+#                                ainda esta dentro do prazo de vigencia
+#     qtd_processos_sancionado — quantas licitacoes o fornecedor ja participou
+#                                (conforme registrado no portal)
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 3 — FORNECEDORES SANCIONADOS")
+print("=" * 60)
+
+# Inicializar colunas com valores neutros
+for col, val in [
+    ("vencedor_sancionado",       0),
+    ("tipo_sancao_vencedor",      None),
+    ("sancao_ativa",              0),
+    ("qtd_processos_sancionado",  0),
+]:
+    base_final[col] = val
+
+if not os.path.isdir(PASTA_SANCIONADOS):
+    print(f"  [AVISO] Pasta nao encontrada: {PASTA_SANCIONADOS}")
+else:
+    # ------------------------------------------------------------------
+    # 3A. Carregar os tres arquivos de sancionados
+    # ------------------------------------------------------------------
+    df_sanc   = ler_csv(PASTA_SANCIONADOS, "df_27_unificado.csv",        "sancionados")
+    df_penal  = ler_csv(PASTA_SANCIONADOS, "df_penalidades_unificado.csv","penalidades")
+    df_procs  = ler_csv(PASTA_SANCIONADOS, "df_processos_unificado.csv",  "proc_sanc")
+
+    if df_sanc.empty or "cnpjCpf" not in df_sanc.columns:
+        print("  [AVISO] df_27_unificado de sancionados vazio ou sem cnpjCpf.")
+    else:
+        df_sanc["cnpjCpf"] = df_sanc["cnpjCpf"].astype(str).str.strip()
+
+        # ------------------------------------------------------------------
+        # 3B. vencedor_sancionado — flag binaria pelo CNPJ
+        # ------------------------------------------------------------------
+        col_cnpj = next(
+            (c for c in ["cnpjCpfVencedor", "cnpjCpf"] if c in base_final.columns),
+            None,
+        )
+        if col_cnpj:
+            sancionados_set = set(df_sanc["cnpjCpf"])
+            base_final["vencedor_sancionado"] = (
+                base_final[col_cnpj].astype(str).str.strip()
+                .isin(sancionados_set).astype(int)
+            )
+            n_sanc = base_final["vencedor_sancionado"].sum()
+            print(f"  vencedor_sancionado: {n_sanc:,} itens ({100*n_sanc/len(base_final):.1f}%)")
+        else:
+            print("  [AVISO] Coluna CNPJ nao encontrada na base final.")
+
+        # ------------------------------------------------------------------
+        # 3C. tipo_sancao_vencedor e sancao_ativa — via df_penalidades
+        # ------------------------------------------------------------------
+        if not df_penal.empty and "origem_arquivo" in df_penal.columns and "penalidades" in df_sanc.columns:
+            # Juntar: df_sanc['penalidades'] UUID -> df_penal['origem_arquivo']
+            sanc_penal = df_sanc[["cnpjCpf", "penalidades"]].merge(
+                df_penal.rename(columns={"origem_arquivo": "penalidades"}),
+                on="penalidades", how="left",
+            )
+
+            # Severidade das sancoes para encontrar a mais grave por fornecedor
+            GRAU = {
+                "INIDONEIDADE": 5,
+                "IMPEDIMENTO":  4,
+                "SUSPENSAO":    3,
+                "MULTA":        2,
+                "ADVERTENCIA":  1,
+            }
+
+            def tipo_mais_grave(tipos):
+                melhor_grau, melhor_tipo = 0, None
+                for t in tipos.dropna():
+                    t_upper = str(t).upper().strip()
+                    for nome, grau in GRAU.items():
+                        if nome in t_upper and grau > melhor_grau:
+                            melhor_grau, melhor_tipo = grau, t_upper
+                return melhor_tipo
+
+            tipo_lookup = (sanc_penal.groupby("cnpjCpf")["tipoSancao"]
+                           .agg(tipo_mais_grave)
+                           .reset_index()
+                           .rename(columns={"tipoSancao": "tipo_sancao_vencedor"}))
+
+            # Sancao ativa: sem data de termino (permanente) OU prazo ainda vigente
+            hoje = pd.Timestamp("2026-04-26")
+            sanc_penal["dataVigenciaFinal"] = pd.to_datetime(
+                sanc_penal["dataVigenciaFinal"], errors="coerce"
+            )
+            sanc_penal["_ativa"] = (
+                sanc_penal["dataVigenciaFinal"].isna()
+                | (sanc_penal["dataVigenciaFinal"] > hoje)
+            )
+            ativa_lookup = (sanc_penal.groupby("cnpjCpf")["_ativa"]
+                            .any()
+                            .astype(int)
+                            .reset_index()
+                            .rename(columns={"_ativa": "sancao_ativa"}))
+
+            print(f"  tipo_sancao_vencedor: {tipo_lookup['tipo_sancao_vencedor'].notna().sum()} fornecedores mapeados")
+            print(f"  sancao_ativa: {ativa_lookup['sancao_ativa'].sum()} fornecedores com sancao ativa")
+        else:
+            tipo_lookup  = pd.DataFrame(columns=["cnpjCpf", "tipo_sancao_vencedor"])
+            ativa_lookup = pd.DataFrame(columns=["cnpjCpf", "sancao_ativa"])
+            print("  [AVISO] df_penalidades ausente ou sem coluna origem_arquivo.")
+
+        # ------------------------------------------------------------------
+        # 3D. qtd_processos_sancionado — via df_processos
+        # ------------------------------------------------------------------
+        if not df_procs.empty and "origem_arquivo" in df_procs.columns and "processos" in df_sanc.columns:
+            sanc_proc = df_sanc[["cnpjCpf", "processos"]].merge(
+                df_procs.rename(columns={"origem_arquivo": "processos"}),
+                on="processos", how="left",
+            )
+            qtd_lookup = (sanc_proc.groupby("cnpjCpf")
+                          .size()
+                          .reset_index(name="qtd_processos_sancionado"))
+            print(f"  qtd_processos_sancionado: min={qtd_lookup['qtd_processos_sancionado'].min()} "
+                  f"max={qtd_lookup['qtd_processos_sancionado'].max()} "
+                  f"media={qtd_lookup['qtd_processos_sancionado'].mean():.1f}")
+        else:
+            qtd_lookup = pd.DataFrame(columns=["cnpjCpf", "qtd_processos_sancionado"])
+            print("  [AVISO] df_processos ausente ou sem coluna origem_arquivo.")
+
+        # ------------------------------------------------------------------
+        # 3E. Combinar lookups e juntar na base_final pelo CNPJ do vencedor
+        # ------------------------------------------------------------------
+        if col_cnpj and not tipo_lookup.empty:
+            lookup_completo = (tipo_lookup
+                               .merge(ativa_lookup,  on="cnpjCpf", how="left")
+                               .merge(qtd_lookup,    on="cnpjCpf", how="left"))
+            lookup_completo["sancao_ativa"]             = lookup_completo["sancao_ativa"].fillna(0).astype(int)
+            lookup_completo["qtd_processos_sancionado"] = lookup_completo["qtd_processos_sancionado"].fillna(0).astype(int)
+
+            # Remover colunas que serao preenchidas pelo merge
+            for col in ["tipo_sancao_vencedor", "sancao_ativa", "qtd_processos_sancionado"]:
+                base_final = base_final.drop(columns=[col], errors="ignore")
+
+            base_final = base_final.merge(
+                lookup_completo.rename(columns={"cnpjCpf": col_cnpj}),
+                on=col_cnpj, how="left",
+            )
+
+            # Fornecedores nao sancionados ficam com valores neutros
+            mask_nao_sanc = base_final["vencedor_sancionado"] == 0
+            base_final.loc[mask_nao_sanc, "tipo_sancao_vencedor"]      = None
+            base_final.loc[mask_nao_sanc, "sancao_ativa"]              = 0
+            base_final.loc[mask_nao_sanc, "qtd_processos_sancionado"]  = 0
+
+            base_final["sancao_ativa"]             = base_final["sancao_ativa"].fillna(0).astype(int)
+            base_final["qtd_processos_sancionado"] = base_final["qtd_processos_sancionado"].fillna(0).astype(int)
+
+
+# =============================================================================
+# ETAPA 3B — AGREGADOS POR LICITACAO (VARIAVEL ALVO + CANDIDATAS AUSENTES)
+#   Calcula no nivel da licitacao e repete o valor em cada linha de item,
+#   garantindo que a base contenha todas as 25 candidatas e a variavel alvo.
+#
+#   Colunas criadas:
+#     economia_itens       — ALVO: soma(ref) - soma(vencedor) por licitacao (R$)
+#     desconto_global_pct  — economia_itens / soma_ref * 100 (%)
+#     media_ratio_itens    — media do ratio vencedor/referencia por licitacao
+#     pct_itens_abaixo_ref — % de itens em que vencedor < referencia
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 3B — AGREGADOS POR LICITACAO (ALVO + CANDIDATAS AUSENTES)")
+print("=" * 60)
+
+_cols_req = {"valorTotalReferencia", "valorTotalVencedor", "ratio_vencedor_referencia"}
+if _cols_req.issubset(base_final.columns):
+    _agg_alvo = (
+        base_final.groupby("chave_licitacao")
+        .agg(
+            _soma_ref_licit      = ("valorTotalReferencia",      "sum"),
+            _soma_venc_licit     = ("valorTotalVencedor",        "sum"),
+            media_ratio_itens    = ("ratio_vencedor_referencia", "mean"),
+            pct_itens_abaixo_ref = ("ratio_vencedor_referencia",
+                                    lambda x: (x < 1).mean() * 100),
+        )
+        .reset_index()
+    )
+    _agg_alvo["economia_itens"] = _agg_alvo["_soma_ref_licit"] - _agg_alvo["_soma_venc_licit"]
+    _agg_alvo["desconto_global_pct"] = np.where(
+        _agg_alvo["_soma_ref_licit"] > 0,
+        (_agg_alvo["economia_itens"] / _agg_alvo["_soma_ref_licit"] * 100).clip(-100, 100),
+        np.nan,
+    )
+    _agg_alvo = _agg_alvo.drop(columns=["_soma_ref_licit", "_soma_venc_licit"])
+
+    base_final = base_final.merge(
+        _agg_alvo[["chave_licitacao", "economia_itens", "desconto_global_pct",
+                   "media_ratio_itens", "pct_itens_abaixo_ref"]],
+        on="chave_licitacao", how="left",
+    )
+    _n_alvo = base_final["economia_itens"].notna().sum()
+    print(f"  economia_itens       : {_n_alvo:,} itens com valor ({100*_n_alvo/len(base_final):.1f}%)")
+    print(f"  desconto_global_pct  : calculado")
+    print(f"  media_ratio_itens    : calculado")
+    print(f"  pct_itens_abaixo_ref : calculado")
+else:
+    _falt = _cols_req - set(base_final.columns)
+    print(f"  [AVISO] Colunas ausentes: {_falt} — variaveis de alvo nao calculadas.")
+    for _col in ["economia_itens", "desconto_global_pct", "media_ratio_itens", "pct_itens_abaixo_ref"]:
+        base_final[_col] = np.nan
+
+
+# =============================================================================
+# ETAPA 4 — VARIAVEIS DERIVADAS E CODIFICACOES CATEGORICAS
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 4 — VARIAVEIS DERIVADAS")
+print("=" * 60)
+
+# --- Variaveis de competicao ---
+base_final["houve_disputa"] = (base_final["qtd_participantes"] > 1).astype(int)
+base_final["log_qtd_participantes"] = np.log1p(base_final["qtd_participantes"])
+
+# --- Logs de valores monetarios ---
+for col_orig, col_log in [
+    ("valorHomologado",        "log_valorHomologado"),
+    ("valorEstimado",          "log_valorEstimado"),
+    ("valorTotalReferencia",   "log_valorTotalReferencia"),
+    ("valorTotalVencedor",     "log_valorTotalVencedor"),
+    ("quantidade",             "log_quantidade"),
+    ("n_itens_licitacao",      "log_n_itens"),
+    ("n_vencedores_distintos", "log_n_vencedores"),
+    ("dias_tramitacao",        "log_dias_tramitacao"),
+    ("economia_absoluta",      "log_economia_absoluta"),
+]:
+    if col_orig in base_final.columns:
+        base_final[col_log] = np.log1p(
+            pd.to_numeric(base_final[col_orig], errors="coerce").clip(lower=0)
+        )
+
+# --- Variavel de interacao: competicao x escala de valor ---
+if "log_valorEstimado" in base_final.columns:
+    base_final["interact_part_logval"] = (
+        base_final["qtd_participantes"] * base_final["log_valorEstimado"]
+    )
+
+# --- Codificacoes categoricas (para correlacao) ---
+for col_orig, col_cod in [
+    ("tipo_processo",    "tipo_processo_cod"),
+    ("modalidade",       "modalidade_cod"),
+    ("tipoObjeto",       "tipoObjeto_cod"),
+    ("formaJulgamento",  "formaJulgamento_cod"),
+    ("orgao_principal",  "orgao_cod"),
+    ("funcao_principal", "funcao_cod"),
+]:
+    if col_orig in base_final.columns:
+        base_final[col_cod] = codificar(base_final[col_orig])
+
+print("  Variaveis derivadas calculadas.")
+print(f"  Colunas totais antes do filtro: {base_final.shape[1]}")
+
+
+# =============================================================================
+# ETAPA 5 — FILTRO DE CONSISTENCIA (FIX-03)
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 5 — FILTRO DE CONSISTENCIA")
+print("=" * 60)
+
+antes = len(base_final)
+
+# Remove itens onde o ratio nao pode ser calculado (referencia nula)
+base_final = base_final[base_final["ratio_vencedor_referencia"].notna()].copy()
+rem_ratio = antes - len(base_final)
+
+# Remove itens onde valorHomologado ainda e nulo apos reconstrucao
+antes2 = len(base_final)
+base_final = base_final[base_final["valorHomologado"].notna()].copy()
+rem_vh = antes2 - len(base_final)
+
+# valorEstimado NAO e filtro obrigatorio (FIX-03)
+n_sem_ve = base_final["valorEstimado"].isna().sum()
+
+print(f"  Removidos por ratio invalido (ref=0 ou nulo):      {rem_ratio:,}")
+print(f"  Removidos por valorHomologado nulo apos reconstrucao: {rem_vh:,}")
+print(f"  Mantidos sem valorEstimado (nao filtrado):          {n_sem_ve:,}")
+print(f"  Restantes: {len(base_final):,}")
+print(f"  Meta 20.000: {'ATINGIDA (OK)' if len(base_final) >= 20_000 else 'NAO ATINGIDA'}")
+
+
+# =============================================================================
+# ETAPA 6 — EXPORTACAO
+# =============================================================================
+
+print("\n" + "=" * 60)
+print("ETAPA 6 — EXPORTACAO")
+print("=" * 60)
+
+# Arredondar floats: 2 casas para valores monetarios/%, 6 para demais
+kw_2dec = ["valor", "economia", "media", "soma", "ratio", "desconto",
+           "pct", "variacao", "amplitude"]
+for col in base_final.columns:
+    if not pd.api.types.is_float_dtype(base_final[col]):
+        continue
+    casas = 2 if any(kw in col.lower() for kw in kw_2dec) else 6
+    base_final[col] = base_final[col].round(casas)
+
+os.makedirs("baseFinalUnificada", exist_ok=True)
 base_final.to_csv(
     ARQUIVO_SAIDA,
     index=False,
     sep=";",
     decimal=",",
-    encoding="utf-8-sig"
+    encoding="utf-8-sig",
 )
-print(f"\n  OK Arquivo salvo: {os.path.abspath(ARQUIVO_SAIDA)}")
+print(f"\n  Arquivo salvo: {os.path.abspath(ARQUIVO_SAIDA)}")
 print(f"  Total de registros: {len(base_final):,}")
 print(f"  Total de colunas  : {base_final.shape[1]}")
 
 
-# -----------------------------------------------------------------------------
-# ETAPA 10 - RESUMO ESTATISTICO E CHECAGEM DE INTEGRIDADE
-# -----------------------------------------------------------------------------
+# =============================================================================
+# ETAPA 7 — RESUMO DE INTEGRIDADE
+# =============================================================================
 
-print("\n" + "="*60)
-print("RESUMO ESTATISTICO - VARIAVEIS PRINCIPAIS")
-print("="*60)
+print("\n" + "=" * 60)
+print("RESUMO POR FONTE")
+print("=" * 60)
 
-cols_resumo = [c for c in [
+for src, grp in base_final.groupby("_fonte"):
+    n_licit   = grp["chave_licitacao"].nunique() if "chave_licitacao" in grp else 0
+    med_part  = grp["qtd_participantes"].mean()
+    pct_sanc  = grp["vencedor_sancionado"].mean() * 100
+    med_econ  = grp["economia_item_pct"].mean() if "economia_item_pct" in grp else float("nan")
+    print(f"  {src:<20} {len(grp):>6,} itens | {n_licit:>4} licit | "
+          f"part_media={med_part:.1f} | sancionado={pct_sanc:.1f}% | "
+          f"econ_item={med_econ:.1f}%")
+
+print("\n" + "=" * 60)
+print("RESUMO POR TIPO DE PROCESSO")
+print("=" * 60)
+
+for tp, grp in base_final.groupby("tipo_processo"):
+    med_part = grp["qtd_participantes"].mean()
+    med_econ = grp["economia_item_pct"].mean() if "economia_item_pct" in grp else float("nan")
+    pct_sanc = grp["vencedor_sancionado"].mean() * 100
+    print(f"  {tp:<12} {len(grp):>6,} itens | "
+          f"part_media={med_part:.1f} | econ_item={med_econ:.1f}% | "
+          f"sancionado={pct_sanc:.1f}%")
+
+print("\n" + "=" * 60)
+print("CHECAGEM DE NULOS NAS COLUNAS PRINCIPAIS")
+print("=" * 60)
+
+cols_checar = [c for c in [
     "qtd_participantes", "houve_disputa",
-    "economia_pct", "economia_absoluta",
-    "valorEstimado", "valorHomologado",
-    "economia_item_pct", "economia_item",
-    "ratio_vencedor_referencia",
-    "media_dias_vigencia", "qtd_contratos",
-    "soma_valorEmpenho", "soma_valorLiquidadoEmpenho", "soma_valorPagoEmpenho",
-    "qtd_empenhos", "contratado_sancionado",
-    "dias_tramitacao", "log_dias_tramitacao",
-    "media_variacao_contr", "interact_part_logval",
-    "formaJulgamento_cod", "media_desconto_item", "amplitude_desconto_item",
+    "ratio_vencedor_referencia", "economia_item_pct",
+    "valorHomologado", "valorEstimado",
+    "economia_pct_licit", "economia_absoluta",
+    "orgao_principal", "tipo_processo",
+    "vencedor_sancionado",
+    "dias_tramitacao",
+    "n_itens_licitacao", "n_vencedores_distintos",
+    "economia_itens", "desconto_global_pct",
+    "media_ratio_itens", "pct_itens_abaixo_ref",
 ] if c in base_final.columns]
 
-if cols_resumo:
-    print(base_final[cols_resumo].describe().round(2).to_string())
-
-print("\n" + "="*60)
-print("CHECAGEM DE INTEGRIDADE")
-print("="*60)
-
-for col in cols_resumo:
+for col in cols_checar:
     nulos = base_final[col].isna().sum()
-    pct   = nulos / len(base_final) * 100 if len(base_final) > 0 else 0
+    pct   = 100 * nulos / len(base_final)
     status = "OK" if pct < 10 else ("AVISO" if pct < 50 else "CRITICO")
-    print(f"  [{status}] {col}: {nulos:,} nulos ({pct:.1f}%)")
+    print(f"  [{status:<7}] {col:<35} {nulos:>6,} nulos ({pct:.1f}%)")
 
 print("\nProcesso concluido!")

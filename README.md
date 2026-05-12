@@ -12,23 +12,45 @@ Os dados foram obtidos do [Portal da Transparência da Prefeitura de Criciúma](
 ```
 analiseEstatisticaPrefeituraCriciuma/
 │
-├── script.py                  # Etapa 1 — pré-processa cada pasta baixada do portal
-├── concatenacaoDados.py       # Etapa 2 — unifica todas as fontes em uma base final (v14)
-├── calcularCorrelacoes.py     # Etapa 3 — análise de correlações com a variável alvo
+├── script.py                      # Etapa 1 — pré-processa cada pasta baixada do portal
+├── concatenacaoDados.py           # Etapa 2 — unifica todas as fontes em uma base final (v14)
+├── calcularCorrelacoes.py         # Etapa 3 — análise de correlações com a variável alvo
+├── testeNormalidade.py            # Etapa 4 — Shapiro-Wilk em todas as 25 variáveis candidatas
+├── normalizacaoBase.py            # Etapa 5 — tentativas de normalização via transformações
+├── ajusteDistribuicoes.py         # Etapa 6 — ajuste de distribuições discretas e contínuas
+├── normalizacaoVariavelAlvo.py    # Etapa 7 — relatório focado na normalização da variável alvo
 │
-├── dadosUnificados/           # Saída do script.py (CSVs intermediários por pasta/ano)
+├── dadosUnificados/               # Saída do script.py (CSVs intermediários por pasta/ano)
 │   ├── Processos Licitatórios Finalizados-2019/
 │   ├── Processos Licitatórios Finalizados-2020/
 │   ├── Dispensa de Licitação-2019/
 │   ├── Dispensa de Licitação-2020/
-│   └── Fornecedores sancionados/     # referência cruzada (opcional)
+│   └── Fornecedores sancionados/         # referência cruzada (opcional)
 │
 ├── baseFinalUnificada/
-│   └── base_unificada_criciuma_v14.csv   # Base final — entrada do calcularCorrelacoes.py
+│   └── base_unificada_criciuma_v14.csv   # Base final — entrada de todas as etapas analíticas
 │
 ├── correlacoesVariaveis/
 │   ├── correlacoes_criciuma.csv          # Tabela de correlações exportada
 │   └── grafico_correlacoes.png           # Gráfico de barras (Spearman)
+│
+├── normalidadeVariaveis/
+│   └── normalidade_shapiro.csv           # Resultados do SW em todas as 25 variáveis
+│
+├── normalizacaoBase/
+│   ├── resultado_transformacoes.csv      # W e p-valor de cada transformação testada
+│   ├── qqplots_normal.png                # Q-Q plots das 4 transformações vs. Normal
+│   └── qqplot_gamma.png                  # Q-Q plot e histograma Gamma ajustada
+│
+├── ajusteDistribuicoes/
+│   ├── resultado_ajuste_discreto.csv     # Qui-quadrado para variáveis de contagem
+│   ├── resultado_ajuste_continuo.csv     # KS para variáveis monetárias
+│   ├── distribuicoes_discretas.png       # PMF e CDF comparativas
+│   └── distribuicoes_continuas.png       # PDF e Q-Q comparativos
+│
+├── normalizacaoVariavelAlvo/
+│   ├── resultado_normalidade.csv         # Tabela SW + KS por distribuição
+│   └── grafico_distribuicoes.png         # Grid 2×2: histograma + 3 Q-Q plots
 │
 ├── Arquivos e Colunas de cada Pasta.xlsx # Dicionário de dados das fontes originais
 └── requirements.txt
@@ -266,6 +288,111 @@ As variáveis do Grupo A (`valorEstimado`, `valorHomologado`, `economia_pct_lici
 - `economia_itens`: concentrada à direita, com licitações de grande valor dominando a magnitude.
 - **Pearson ≈ 0 em quase todas as variáveis de competição** — confirma que as relações são monotônicas mas não lineares. A interpretação deve ser feita sobre **Spearman** (robusto a outliers).
 - `qtd_participantes` e `houve_disputa` correlacionam-se positivamente com `economia_itens` (Spearman ≈ +0,49 e +0,33), sustentando a hipótese central de que maior competição está associada a maior economia.
+
+## Normalização da variável alvo
+
+### O que é normalizar uma variável
+
+"Normalizar" no contexto estatístico significa identificar se uma variável segue a **distribuição Normal (gaussiana)** — a curva em sino simétrica — e, caso não siga, aplicar transformações matemáticas ou identificar qual distribuição teórica de fato a descreve. Isso importa porque muitos modelos inferenciais clássicos (regressão linear, ANOVA, teste t) assumem normalidade dos dados ou dos resíduos.
+
+### Roteiro aplicado
+
+O professor solicitou o seguinte fluxo para a variável-alvo `economia_itens`:
+
+1. Testar normalidade com o teste de Shapiro-Wilk (SW).
+2. Se rejeitada → tentar transformações e, em seguida, ajustar as distribuições estudadas em aula.
+
+### Etapa 1 — Teste de Shapiro-Wilk (`testeNormalidade.py` e `normalizacaoBase.py`)
+
+O teste SW verifica a hipótese H₀: "os dados seguem distribuição Normal". Um p-valor ≥ 0,05 indica que não há evidência para rejeitar essa hipótese (dados compatíveis com a Normal). Um p-valor < 0,05 rejeita a normalidade.
+
+| Versão dos dados | W | p-valor | Normal? |
+|---|---|---|---|
+| `economia_itens` original | 0,1757 | 7,67 × 10⁻⁴⁷ | **NÃO** |
+
+O valor W=0,1757 é muito próximo de zero (W=1 seria perfeito), confirmando forte assimetria.
+
+### Etapa 2 — Tentativas de transformação (`normalizacaoBase.py`)
+
+Foram aplicadas três transformações matemáticas clássicas para reduzir a assimetria:
+
+| Transformação | Fórmula | W | p-valor | Normal? |
+|---|---|---|---|---|
+| Log-deslocada | `log(x − mín + 1)` | 0,1009 | 3,57 × 10⁻⁴⁸ | **NÃO** |
+| Yeo-Johnson | automática (λ = 0,9535) | 0,2301 | 8,26 × 10⁻⁴⁶ | **NÃO** |
+| Box-Cox | automática (λ = 0,3723) | 0,3209 | 6,11 × 10⁻⁴⁴ | **NÃO** |
+
+As transformações melhoraram o W (de 0,18 para 0,32), confirmando redução da assimetria, mas nenhuma atingiu p ≥ 0,05. Isso é esperado para dados monetários de licitações públicas: poucas licitações de grande valor criam uma cauda direita muito longa que resistem a transformações simples.
+
+### Etapa 3 — Ajuste de distribuições alternativas (`normalizacaoVariavelAlvo.py`)
+
+Como nenhuma transformação produziu normalidade, o passo seguinte foi identificar **qual distribuição teórica descreve os dados**. Em vez de forçar a Normal, busca-se a distribuição que naturalmente se encaixa no formato dos dados.
+
+#### Distribuições discretas (Poisson, Geométrica, Binomial Negativa, Hipergeométrica)
+
+Não aplicáveis à variável `economia_itens`, pois:
+
+- Distribuições discretas só aceitam valores inteiros não-negativos (`{0, 1, 2, …}` ou `{1, 2, 3, …}`).
+- `economia_itens` é uma variável **contínua** e possui valores negativos (licitações onde o valor pago superou a referência).
+
+Essas distribuições são adequadas para variáveis de **contagem** como `qtd_participantes` e `n_itens_licitacao`.
+
+#### Distribuições contínuas testadas (subconjunto eco > 0, n = 588)
+
+O teste de Kolmogorov-Smirnov (KS) mede o maior afastamento entre a distribuição acumulada observada e a teórica. Estatística KS próxima de zero e p ≥ 0,05 indicam bom ajuste.
+
+| Distribuição | KS | p-valor | Ajusta (α = 0,05)? |
+|---|---|---|---|
+| Normal | 0,4144 | ≈ 0 | **NÃO** |
+| Gamma | 0,1278 | ≈ 0 | **NÃO** |
+| **Log-Normal** | **0,0377** | **0,365** | **SIM ✓** |
+
+### Por que a Log-Normal se ajusta
+
+A distribuição Log-Normal é o modelo natural para variáveis monetárias que:
+
+1. **São positivas por natureza** — contratos e economias financeiras não podem ser negativos em sua lógica estrutural; os 11,7 % de valores negativos refletem casos excepcionais onde o vencedor cobrou acima da referência.
+2. **Têm cauda longa à direita** — a maioria das licitações gera economias pequenas ou moderadas, mas poucas licitações de grande vulto criam valores muito altos; a Log-Normal captura exatamente esse padrão.
+3. **São geradas por efeitos multiplicativos** — preços de mercado resultam de negociações e margens aplicadas em cadeia (produto de fatores), e o produto de variáveis independentes tende à Log-Normal pelo Teorema Central do Limite aplicado à escala logarítmica.
+
+Em termos práticos: se `X` ~ Log-Normal, então `log(X)` ~ Normal. Isso significa que aplicar o logaritmo à variável-alvo produz uma distribuição próxima da Normal — exatamente o que as transformações simples tentaram, mas sem conseguir pela presença de zeros e negativos.
+
+### Fórmula da distribuição Log-Normal
+
+Para uma variável aleatória $X > 0$, a função densidade de probabilidade (PDF) da distribuição Log-Normal é:
+
+$$f(x;\, \mu, \sigma) = \frac{1}{x \, \sigma \sqrt{2\pi}} \exp\!\left(-\frac{(\ln x - \mu)^2}{2\sigma^2}\right), \quad x > 0$$
+
+Onde:
+- $\mu$ é a média do logaritmo natural de $X$ (parâmetro de localização na escala log)
+- $\sigma$ é o desvio padrão do logaritmo natural de $X$ (parâmetro de escala na escala log)
+- $\ln x$ é o logaritmo natural de $x$
+
+**Parâmetros ajustados por MLE para `economia_itens` (n = 588, eco > 0):**
+
+| Parâmetro | Valor | Interpretação |
+|---|---|---|
+| $\mu_{\log}$ | 10,2866 | Mediana na escala original: e^{10,2866} ≈ R$ 29.420 |
+| $\sigma_{\log}$ | 2,0705 | Dispersão na escala log — valor alto indica cauda longa |
+
+### Implicações para o projeto
+
+| Consequência | Detalhe |
+|---|---|
+| **Transformação log é justificada matematicamente** | Se `economia_itens` ~ Log-Normal, então `log(economia_itens)` ~ Normal. As colunas `log_*` já calculadas na base têm fundamento teórico. |
+| **Correlações de Spearman permanecem válidas** | Spearman é baseado em postos e independe da distribuição — a escolha foi correta mesmo antes de identificar a Log-Normal. |
+| **Modelos de regressão recomendados** | GLM com família Gamma e link log, ou regressão Log-Normal. Ambos não exigem normalidade dos dados brutos, apenas dos resíduos padronizados. |
+
+### Scripts e saídas
+
+| Script | Função | Saídas |
+|---|---|---|
+| `testeNormalidade.py` | SW em todas as 25 variáveis candidatas | `normalidadeVariaveis/normalidade_shapiro.csv` |
+| `normalizacaoBase.py` | Transformações + Gamma na variável alvo | `normalizacaoBase/resultado_transformacoes.csv`, Q-Q plots |
+| `ajusteDistribuicoes.py` | Ajuste de Poisson/BN/Geométrica (contagens) e Gamma/LogNormal/Weibull (monetárias) | `ajusteDistribuicoes/` |
+| `normalizacaoVariavelAlvo.py` | Relatório focado no roteiro do professor | `normalizacaoVariavelAlvo/resultado_normalidade.csv`, `grafico_distribuicoes.png` |
+
+---
 
 ## Por que `df.corr()` diretamente na base não é adequado
 

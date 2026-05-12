@@ -1,0 +1,5 @@
+﻿distribuicao;parametros;ks_estatistica;ks_p_valor;ajusta_alpha005
+Normal (Shapiro-Wilk);μ=159402.03  σ=848840.45;0.1757;0.0;NÃO
+Normal;μ=192449.25  σ=889765.49;0.4144;0.0;NÃO
+Gamma;α=0.3564  β=539941.63;0.1278;0.0;NÃO
+Log-Normal;μ_log=10.2866  σ_log=2.0705;0.0377;0.364986;SIM

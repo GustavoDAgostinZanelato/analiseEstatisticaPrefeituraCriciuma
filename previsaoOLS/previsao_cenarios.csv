@@ -1,0 +1,4 @@
+﻿cenario;qtd_participantes;previsao_log;previsao_R$;IC_media_inf_R$;IC_media_sup_R$;IC_previsao_inf_R$;IC_previsao_sup_R$
+Baixa competicao;1;9,5943;14680,22;10265,83;20992,64;1166,14;184670,8
+Competicao tipica;3;9,8362;18697,88;15610,32;22396,08;1513,9;230804,65
+Alta competicao;8;9,9999;22023,18;15441,81;31409,39;1750,55;276932,89

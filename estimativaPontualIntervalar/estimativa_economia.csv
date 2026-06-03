@@ -1,0 +1,13 @@
+﻿grandeza;escala;valor
+n (economia > 0);-;588,0
+media do log (mu_log);log;10,2866
+desvio-padrao do log;log;2,0722
+erro-padrao da media;log;0,08546
+t critico (gl=587);log;1,964
+IC inferior;log;10,1187
+IC superior;log;10,4544
+estimativa pontual (mediana);R$;29335,59
+IC inferior;R$;24802,93
+IC superior;R$;34696,58
+media aritmetica (referencia);R$;192449,25
+mediana amostral (referencia);R$;30001,0

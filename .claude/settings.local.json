@@ -3,7 +3,10 @@
     "allow": [
       "Bash(.venv/Scripts/python.exe calcularCorrelacoes.py)",
       "Bash(.venv/Scripts/pip.exe install *)",
-      "Bash(.venv/Scripts/python.exe concatenacaoDados.py)"
+      "Bash(.venv/Scripts/python.exe concatenacaoDados.py)",
+      "Bash(find \"C:\\\\Users\\\\gusta\\\\Documents\\\\Git Hub\\\\analiseEstatísticaPrefeituraCriciuma\" -maxdepth 2 -not -path \"*/.venv/*\" -not -path \"*\\\\\\\\.venv\\\\\\\\*\")",
+      "PowerShell(cd \"C:\\\\Users\\\\gusta\\\\Documents\\\\Git Hub\\\\analiseEstatísticaPrefeituraCriciuma\"; $env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe regressaoOLS.py 2>&1)",
+      "PowerShell(cd \"C:\\\\Users\\\\gusta\\\\Documents\\\\Git Hub\\\\analiseEstatísticaPrefeituraCriciuma\"; $env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe regressaoOLS.py 2>&1 | Select-String -Pattern \"\\(R²|F-stat|Prob|N =|k =\\)\")"
     ]
   }
 }

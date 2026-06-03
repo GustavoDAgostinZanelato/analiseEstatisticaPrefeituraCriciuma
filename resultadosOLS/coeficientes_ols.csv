@@ -1,0 +1,17 @@
+﻿variavel;coeficiente;EP_HC3;IC_inf_95;IC_sup_95;p_valor_HC3;significancia
+const;-0,4843;0,4918;-1,4513;0,4827;0,3253;n.s.
+desconto_global_pct;0,0612;0,0115;0,0386;0,0838;0,0;***
+media_ratio_itens;-0,8336;0,6885;-2,1874;0,5202;0,2268;n.s.
+media_desconto_item;-0,0027;0,0127;-0,0278;0,0223;0,8304;n.s.
+interact_part_logval;0,0146;0,0226;-0,0298;0,059;0,5194;n.s.
+valorEstimado;-0,0;0,0;-0,0;0,0;0,9995;n.s.
+log_valorEstimado;0,1564;0,1411;-0,1211;0,4339;0,2685;n.s.
+economia_pct_licit;0,0003;0,0002;0,0;0,0006;0,0364;*
+log_qtd_participantes;1,4551;0,8703;-0,2562;3,1664;0,0954;n.s.
+qtd_participantes;-0,3784;0,3619;-1,09;0,3333;0,2965;n.s.
+log_valorHomologado;0,4783;0,1137;0,2548;0,7018;0,0;***
+valorHomologado;-0,0;0,0;-0,0;0,0;0,4946;n.s.
+pct_itens_abaixo_ref;0,0183;0,004;0,0104;0,0262;0,0;***
+log_dias_tramitacao;-0,0469;0,092;-0,2278;0,1339;0,6102;n.s.
+dias_tramitacao;0,0033;0,0031;-0,0029;0,0095;0,2899;n.s.
+houve_disputa;-0,3602;0,3855;-1,1182;0,3979;0,3508;n.s.
